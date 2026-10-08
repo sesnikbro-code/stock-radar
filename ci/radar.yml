@@ -1,0 +1,68 @@
+# Stock Radar - daily cloud run. Saved in GitHub as .github/workflows/radar.yml
+name: radar
+on:
+  schedule:
+    - cron: "40 3 * * 2-6"
+  push:
+    paths: ["*.zip"]
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: scan / ticker / backtest / test-alert
+        default: scan
+      symbols:
+        description: stock symbols for ticker mode
+        default: ""
+permissions:
+  contents: write
+  actions: write
+  pages: write
+  id-token: write
+concurrency: radar
+jobs:
+  radar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    environment: github-pages
+    env:
+      MODE: ${{ inputs.mode }}
+      SYMBOLS: ${{ inputs.symbols }}
+      GH_TOKEN: ${{ github.token }}
+      SEC_EMAIL: ${{ secrets.SEC_EMAIL }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      CALLMEBOT_PHONE: ${{ secrets.CALLMEBOT_PHONE }}
+      CALLMEBOT_APIKEY: ${{ secrets.CALLMEBOT_APIKEY }}
+      FINNHUB_API_KEY: ${{ secrets.FINNHUB_API_KEY }}
+      FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: unpack
+        run: |
+          for z in *.zip; do
+            [ -f "$z" ] || continue
+            rm -rf /tmp/app && mkdir /tmp/app && unzip -oq "$z" -d /tmp/app
+            src=/tmp/app
+            if [ "$(ls -A /tmp/app | wc -l)" = 1 ] && [ -d "$(echo /tmp/app/*)" ]; then src="$(echo /tmp/app/*)"; fi
+            rm -rf "$src/.github" && cp -r "$src"/. . && git rm -q "$z" && touch .radar_setup
+          done
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/cache@v4
+        with:
+          path: data/cache
+          key: radar-${{ github.run_id }}
+          restore-keys: radar-
+      - name: run
+        run: bash ci/run.sh
+      - name: save
+        if: always()
+        run: bash ci/save.sh
+      - if: always()
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+      - if: always()
+        uses: actions/deploy-pages@v4

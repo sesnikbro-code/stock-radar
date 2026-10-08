@@ -1,0 +1,124 @@
+# הגדרות רדאר המניות. כל שורה שתמחק תחזור לברירת המחדל שבקוד.
+
+general:
+  # חובה: SEC (רשות ניירות הערך האמריקאית) דורשת אימייל ליצירת קשר בכל בקשה. אפשר גם בקובץ .env
+  sec_email: ""
+  data_dir: data
+  reports_dir: reports
+  log_level: INFO
+
+universe:
+  source: sec              # sec = כל המניות בנאסד"ק וב-NYSE | list = רק הרשימה שבשדה list
+  exchanges: [Nasdaq, NYSE]
+  max_tickers: 0           # 0 = בלי הגבלה. למחשב חלש או לבדיקה ראשונה: 800
+  watchlist: []            # מניות שתמיד ייבדקו לעומק, למשל [NVDA, TEVA, ESLT]
+  list: []                 # בשימוש רק כש-source: list
+  extra_tickers_file: ""   # קובץ CSV עם מניות נוספות לבדיקה לאחור (למשל מניות שנמחקו)
+
+filters:                   # מסננים לפני הכול: מונעים מניות פני ומניפולציות
+  min_price: 2.0           # מחיר מינימלי בדולר
+  min_dollar_volume: 5000000   # מחזור מסחר יומי ממוצע מינימלי בדולר
+  min_market_cap: 200000000    # שווי שוק מינימלי
+  min_history_days: 120    # ימי מסחר מינימליים (מסנן הנפקות טריות מאוד)
+
+scan:
+  top_candidates: 100      # כמה מניות עוברות לבדיקה מעמיקה (יותר = איטי יותר)
+  max_picks: 10            # כמה מניות לבחור ביום
+  min_upside_score: 60     # ציון פוטנציאל מינימלי (0-100)
+  max_risk_score: 80       # ציון סיכון מקסימלי (0-100)
+  history_period: 2y
+  workers: 4
+
+insider:                   # קניות ומכירות של מנהלים ובעלי עניין (Form 4)
+  enabled: true
+  lookback_days: 90
+  discovery_enabled: true  # סריקת כל דיווחי Form 4 בשוק כדי לגלות מניות חדשות עם קניות
+  discovery_days: 3
+  discovery_max_filings: 1500
+  cluster_min_insiders: 2
+  cluster_min_value: 250000
+
+analysts:
+  enabled: true
+  accuracy_horizon_days: 60   # לפי כמה ימי מסחר בודקים אם אנליסט צדק
+
+news:
+  enabled: true
+  lookback_days: 7
+  use_finnhub: true        # פעיל רק אם יש FINNHUB_API_KEY ב-.env
+  use_llm: false           # true = Claude מסווג את הכותרות ומסכם בעברית (דורש ANTHROPIC_API_KEY, בתשלום)
+  llm_model: claude-haiku-5-5
+  show_original_headlines: true   # להציג בדוח את הכותרות המקוריות (באנגלית) כקישורים
+
+options:
+  enabled: true
+  max_expirations: 2
+
+gov_contracts:             # חוזים מממשלת ארה"ב (USASpending.gov)
+  enabled: true
+  lookback_days: 120
+  max_market_cap: 30000000000
+
+geopolitics:               # מלחמות ומתיחות (GDELT)
+  enabled: true
+
+macro:                     # ריבית, אינפלציה, אבטלה, VIX (FRED)
+  enabled: true
+
+countries:                 # צמיחה ואינפלציה במדינות (IMF / הבנק העולמי)
+  enabled: true
+  max_countries: 8
+  check_conflict: true
+
+weights:                   # משקל כל אות בציון הסופי. המערכת מכיילת אותם לבד לפי התוצאות (learning)
+  momentum: 1.0
+  volume_accumulation: 0.8
+  breakout_setup: 0.7
+  insider_buying: 1.5
+  analyst_revisions: 1.3
+  analyst_ratings: 0.6
+  price_target: 0.4
+  short_squeeze: 0.8
+  options_flow: 0.8
+  news: 0.7
+  catalysts: 0.8
+  gov_contracts: 0.7
+  geopolitics: 0.5
+  macro: 0.5
+  country: 0.4
+
+risk:
+  account_size: 50000      # גודל התיק בדולרים, לחישוב גודל פוזיציה
+  risk_per_trade_pct: 1.0  # כמה אחוז מהתיק מוכנים להפסיד בעסקה אחת אם הסטופ נפגע
+  atr_stop_multiple: 2.5   # מרחק הסטופ = 2.5 כפול התנודה היומית הממוצעת
+  max_position_pct: 10     # פוזיציה מקסימלית באחוזים מהתיק
+  earnings_blackout_days: 5
+
+paper:                     # מסחר על נייר: המערכת "קונה" את הבחירות שלה ועוקבת אחרי התוצאה
+  enabled: true
+  max_open_positions: 15
+  max_hold_days: 90
+  trailing_stop: true
+
+learning:                  # כיול משקלות לפי מה שבאמת עבד
+  enabled: true
+  horizon_days: 30
+  min_samples: 60          # כמה תוצאות צריך לפני ששינוי משקל נכנס לתוקף
+  gain: 5.0
+  min_factor: 0.25
+  max_factor: 2.0
+
+backtest:
+  years: 5
+  rebalance_days: 21
+  top_n: 10
+  hold_days: 21
+  cost_pct: 0.2
+  use_stops: true
+  explosive_threshold: 0.30
+  explosive_window_days: 63
+  max_tickers: 1500
+
+alerts:
+  max_items: 10
+  send_when_empty: true

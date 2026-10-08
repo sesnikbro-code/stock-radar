@@ -1,0 +1,10 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+data/*
+!data/.gitkeep
+reports/
+.radar_setup
+.radar_mode
+*.zip
