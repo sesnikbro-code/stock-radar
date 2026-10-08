@@ -5,6 +5,7 @@
   demo/latest.json       synthetic demo data (shown until the first real scan exists)
   tickers/SYM.json       on-demand single-stock analyses, tickers/index.json lists them
   backtest.json          latest backtest summary
+  model.json             the probability model and its out-of-sample test (written by train.py)
   status.json            what ran last, when, and whether it worked
 """
 from __future__ import annotations
@@ -75,6 +76,7 @@ def result_json(r: dict) -> dict:
         "news": [{"title": i["title"], "url": i.get("url", ""), "label": i.get("label", ""),
                   "tone": 1 if i.get("s", 0) > 0 else -1 if i.get("s", 0) < 0 else 0} for i in items],
         "closes": r.get("closes", []),
+        "prob": r.get("prob"), "prob_base": r.get("prob_base"),
     }
 
 
@@ -101,6 +103,7 @@ def scan_json(res: dict) -> dict:
         "results": [result_json(r) for r in res["results"]],
         "paper": res.get("paper") or {"n": 0},
         "learning": learning,
+        "model": res.get("model"),
     }
 
 

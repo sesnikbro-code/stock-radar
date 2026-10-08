@@ -17,4 +17,6 @@ SIGNAL_LABELS = {
     "geopolitics": "מלחמות ומתיחות",
     "macro": "מאקרו",
     "country": "נתוני מדינה",
+    "earnings_drift": "תגובה לדוח רבעוני",
+    "model": "מודל הסיכוי",
 }

@@ -80,7 +80,7 @@
   // ------------------------------------------------------------------ state
   const state = {
     tab: 'today', data: null, demo: false, status: null, index: null, viewing: null, loading: true,
-    backtest: undefined, tickers: undefined, search: '', searchMsg: null, job: store.get('job'),
+    backtest: undefined, model: undefined, tickers: undefined, search: '', searchMsg: null, job: store.get('job'),
     installEvt: null, sheet: null,
   };
 
@@ -102,6 +102,7 @@
     else { state.data = null; state.demo = false; state.index = null; }  // the real app never shows demo data
     state.viewing = null;
     state.backtest = undefined;
+    state.model = undefined;
     state.tickers = undefined;
     state.loading = false;
     render();
@@ -249,15 +250,17 @@
     const out = [];
     const job = state.job;
     if (job) {
-      const what = job.mode === 'ticker' ? `ניתוח ${job.symbols}` : job.mode === 'backtest' ? 'בדיקה לאחור' : job.mode === 'test-alert' ? 'הודעת בדיקה' : 'סריקה';
+      const what = job.mode === 'ticker' ? `ניתוח ${job.symbols}` : job.mode === 'backtest' ? 'בדיקה לאחור' : job.mode === 'test-alert' ? 'הודעת בדיקה' : job.mode === 'train' ? 'אימון מודל הסיכוי' : 'סריקה';
       const st = job.state === 'queued' ? 'ממתינה בתור' : 'רצה עכשיו';
       out.push(banner('info', `${what} ${st} בענן`, `התחילה ${ago(new Date(job.since).toISOString())}. האפליקציה תתעדכן לבד כשתסתיים.`));
     }
     const st = state.status;
     if (st && st.ok === false) {
       out.push(banner('bad', 'הריצה האחרונה בענן נכשלה', `${st.message || ''} (${ago(st.finished)})`));
-    } else if (st && st.ok && st.mode === 'setup' && !state.data) {
-      out.push(banner('good', 'ההתקנה הצליחה', st.message));
+    } else if (st && st.ok && st.mode === 'setup' && (!state.data || daysSince(st.finished) < 0.2)) {
+      out.push(banner('good', state.data ? 'העדכון הותקן' : 'ההתקנה הצליחה', st.message));
+    } else if (st && st.ok && st.mode === 'train' && daysSince(st.finished) < 1) {
+      out.push(banner('good', 'מודל הסיכוי אומן ונבדק', st.message));
     }
     if (state.viewing) {
       out.push(banner('warn', `מוצגת הסריקה מ־${dmy(state.viewing)}`, '', '<div style="margin-top:6px"><button class="btn small ghost" data-act="today-latest">חזרה לסריקה האחרונה</button></div>'));
@@ -270,6 +273,18 @@
       out.push(banner('warn', 'הנתונים לא התעדכנו כמה ימים', `הסריקה האחרונה מ־${dmy(state.data.date)}. בדוק בהגדרות או בלשונית Actions ב־GitHub.`));
     }
     return out.join('');
+  }
+
+  // chance (from the tested model) that the stock rises 30% before its stop is hit
+  function probLine(r) {
+    if (!isNum(r.prob) || !isNum(r.prob_base) || !r.prob_base) return '';
+    const ratio = r.prob / r.prob_base;
+    const tone = ratio >= 1.3 ? 'good' : ratio <= 0.7 ? 'bad' : '';
+    const w = Math.min(100, (r.prob / Math.max(0.5, r.prob * 1.2)) * 100), bw = Math.min(100, (r.prob_base / Math.max(0.5, r.prob * 1.2)) * 100);
+    return `<div class="prob ${tone}" role="img" aria-label="סיכוי ${pct(r.prob)} לעומת ממוצע ${pct(r.prob_base)}">
+      <div class="prob-top"><span>סיכוי לעלות 30% לפני הסטופ</span><b>${pct(r.prob)}</b></div>
+      <div class="prob-track"><i style="width:${w.toFixed(1)}%"></i><span class="base" style="inset-inline-start:${bw.toFixed(1)}%"></span></div>
+      <div class="prob-sub">ממוצע כל המניות: ${pct(r.prob_base)}${ratio >= 1.15 ? ` · פי ${ratio.toFixed(1)}` : ratio <= 0.85 ? ' · נמוך מהממוצע' : ' · בערך כמו הממוצע'}</div></div>`;
   }
 
   function pickCard(r, i) {
@@ -286,6 +301,7 @@
         <span class="chg ${chg >= 0 ? 'up' : 'down'}">${pct(chg, 0, true)}<span class="muted small" style="font-weight:400"> 3 חודשים</span></span></div>
       ${(r.pros || []).length ? `<ul class="pick-reasons">${r.pros.slice(0, 2).map((p) => `<li>${esc(p)}</li>`).join('')}</ul>` : ''}
       ${warn ? `<div class="pick-warn"><b>שים לב:</b><span>${esc(warn)}</span></div>` : ''}
+      ${probLine(r)}
       <div class="chips"><span class="chip ${rc}">סיכון <b>${Math.round(r.risk)}</b> · ${rl}</span>
         <span class="chip">מחיר <b class="num">${price(r.price)}</b></span>
         ${r.plan && r.plan.stop ? `<span class="chip">סטופ <b class="num">${price(r.plan.stop)}</b></span>` : ''}</div>
@@ -395,7 +411,51 @@
         ${(lr.signals || []).map((s) => divRow(s.label, Math.max(-1, Math.min(1, s.ic / 0.2)), (s.ic >= 0 ? '+' : '') + s.ic.toFixed(2), s.factor ? `משקל ×${s.factor.toFixed(2)}` : '')).join('')}
         <p class="muted small" style="margin:8px 0 0">אות שעזר מקבל משקל גבוה יותר בציון, אות שהטעה מקבל משקל נמוך יותר.</p></div>`;
     }
-    return `<div class="stack">${state.demo ? banner('info', 'נתוני דמו', 'הביצועים במסך הזה מחושבים על שוק מדומה ואינם אומרים דבר על השוק האמיתי.') : ''}${paper}${learn}${viewBacktest()}</div>`;
+    return `<div class="stack">${state.demo ? banner('info', 'נתוני דמו', 'הביצועים במסך הזה מחושבים על שוק מדומה ואינם אומרים דבר על השוק האמיתי.') : ''}${viewModel()}${paper}${learn}${viewBacktest()}</div>`;
+  }
+
+  function viewModel() {
+    if (state.model === undefined) { loadModel(); return `<div class="card"><h3>מודל הסיכוי</h3><p class="muted">טוען…</p></div>`; }
+    const run = cloudReady() ? '<button class="btn small ghost" data-run="train">אמן מחדש</button>' : '';
+    const md = state.model;
+    if (!md) {
+      return `<div class="card"><h3>מודל הסיכוי</h3><p class="muted">המודל לומד מ־5 שנות היסטוריה אמיתית אילו מניות עלו 30% לפני שהסטופ נפגע, ונבדק על שנים שלא ראה. האימון מתחיל לבד אחרי עדכון האפליקציה ולוקח 30 עד 60 דקות. אחריו יופיע כאן איך הוא הצליח בבדיקה.</p>${run}</div>`;
+    }
+    const v = md.validation || {};
+    const cov = md.coverage || {};
+    const q = isNum(v.auc) ? Math.max(0, Math.min(1, (v.auc - 0.52) / 0.08)) : 0;
+    const passed = q > 0 && (v.top_lift || 0) >= 1.1;
+    const dec = v.deciles || [];
+    const maxRate = Math.max(0.01, ...dec.map((x) => x.rate || 0));
+    const bars = dec.map((x, i) => `<div class="dec-col" title="קבוצה ${i + 1}: ${pct(x.rate)}"><span class="dec-v">${pct(x.rate)}</span><i style="height:${Math.max(3, (x.rate / maxRate) * 100).toFixed(0)}%"></i></div>`).join('');
+    const ww = md.what_worked || [];
+    const good = ww.filter((x) => x.lift >= 1.1).slice(0, 6);
+    const bad = ww.filter((x) => x.lift <= 0.9).slice(-4).reverse();
+    const wwRow = (x) => divRow(x.text, Math.max(-1, Math.min(1, (x.lift - 1) / 0.75)), pct(x.rate, 1), x.lift ? `פי ${x.lift.toFixed(1)} מהממוצע` : '');
+    const years = (v.by_year || []).filter((y) => isNum(y.top));
+    return `<div class="card"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><h3>מודל הסיכוי</h3>${run}</div>
+      <p class="muted small" style="margin:2px 0 10px">אומן ב־${dmy(md.trained)}${md.demo ? ' · דמו' : ''} · ${md.n_tickers} מניות · ${md.years} שנים · ${Number(md.n_rows || 0).toLocaleString('en-US')} תצפיות</p>
+      ${passed ? '' : banner('warn', 'המודל לא עבר את הבדיקה', 'בתקופה שהוא לא ראה הוא לא היה טוב מספיק מהממוצע, ולכן הוא לא משפיע כרגע על הציונים. הוא יאומן מחדש לבד בעוד חודש.')}
+      <p class="small" style="margin:0 0 8px">השאלה: מניה נקנית במחיר הפתיחה של היום שאחרי, עם סטופ לפי התנודה שלה. האם היא תעלה 30% תוך 3 חודשים, לפני שתרד לסטופ?</p>
+      <p class="small" style="margin:0 0 10px">הבדיקה ההוגנת: המודל למד רק משנים מוקדמות, ונבדק על ${dmy(v.test_start)} עד ${dmy(v.test_end)} – תקופה שלא ראה.</p>
+      <div class="duo"><div><div class="eyebrow">${v.top_n || 10} המובילות של המודל בכל שבוע</div><span class="big sm ${passed ? 'up' : ''}">${pct(v.top_rate)}</span><span class="muted small">הגיעו ל־30% לפני הסטופ</span></div>
+        <div><div class="eyebrow">כל המניות</div><span class="big sm" style="color:var(--ink-2)">${pct(v.base)}</span><span class="muted small">הממוצע, לשם השוואה</span></div></div>
+      <div class="chips" style="margin:10px 0">${isNum(v.top_lift) ? `<span class="chip ${passed ? 'good' : ''}">פי <b>${v.top_lift.toFixed(1)}</b> מהממוצע</span>` : ''}
+        ${isNum(v.tech_top_rate) ? `<span class="chip">הסינון הטכני הישן: <b>${pct(v.tech_top_rate)}</b></span>` : ''}
+        ${isNum(v.auc) ? `<span class="chip">AUC <b class="num">${v.auc.toFixed(2)}</b></span>` : ''}</div>
+      ${years.length ? `<div class="eyebrow" style="margin:4px 0 4px">שנה אחרי שנה (המובילות מול הממוצע)</div><div class="chips">${years.map((y) => `<span class="chip ${y.top > y.base ? 'good' : 'bad'}">${y.year}: <b>${pct(y.top)}</b> מול ${pct(y.base)}</span>`).join('')}</div>` : ''}
+      ${dec.length ? `<div class="eyebrow" style="margin:14px 0 4px">10 קבוצות לפי הסיכוי שהמודל נתן – כמה באמת הגיעו ל־30%</div>
+        <div class="dec">${bars}</div><div class="dec-axis"><span>סיכוי נמוך</span><span>סיכוי גבוה</span></div>
+        <p class="muted small" style="margin:4px 0 0">אם המודל טוב, העמודות עולות מקבוצה לקבוצה.</p>` : ''}
+      ${good.length || bad.length ? `<div class="eyebrow" style="margin:14px 0 4px">מה עבד ב־5 השנים האחרונות (כל אחד לבד)</div>
+        ${divHead('פחות מהממוצע', 'יותר מהממוצע')}${good.map(wwRow).join('')}${bad.map(wwRow).join('')}
+        <p class="muted small" style="margin:6px 0 0">המספר = כמה מהמניות במצב הזה הגיעו ל־30% לפני הסטופ. מניות תנודתיות מגיעות לשם יותר – אבל גם יורדות מהר, ולכן תמיד להסתכל גם על ציון הסיכון.</p>` : ''}
+      <p class="muted small" style="margin:10px 0 0">AUC מודד כמה טוב המודל מדרג: 0.5 = ניחוש, 0.6 ומעלה = כוח ניבוי שימושי בשוק ההון. הבדיקה כוללת רק מניות שנסחרות היום (מניות שנמחקו חסרות), ולכן קצת אופטימית.${cov.insider === false ? ' באימון הזה נתוני המנהלים ההיסטוריים לא היו זמינים.' : ''} המודל מתאמן מחדש לבד כל חודש.</p></div>`;
+  }
+  async function loadModel() {
+    const md = await getJSON(state.demo ? 'demo/model.json' : 'model.json');
+    state.model = md || null;
+    if (state.tab === 'perf') render();
   }
 
   function viewBacktest() {
@@ -512,6 +572,9 @@
           <div class="price-line"><span class="px">${price(r.price)}</span><span class="chg ${chg >= 0 ? 'up' : 'down'}">${pct(chg, 1, true)}</span></div></div></div>
         <div class="card"><div class="rings">${ring(r.upside, 'var(--accent)', 'פוטנציאל עלייה', true)}${ring(r.risk, riskColor(r.risk), `סיכון ${rl}`, true)}
           <div class="small muted" style="align-self:center;flex:1;min-width:0">פוטנציאל: כמה אותות מצביעים לעלייה, בשקלול הביטחון בכל אחד. סיכון: תנודתיות, אירועים קרובים ומצב השוק.</div></div></div>
+        ${isNum(r.prob) && r.prob_base ? `<div class="card"><h3>מודל הסיכוי</h3>${probLine(r)}
+          <p class="small" style="margin:10px 0 0">מתוך מניות שנראו כמו המניה הזו ב־5 השנים האחרונות (מחיר ומגמה, קניות מנהלים, תגובה לדוחות ומצב השוק), ${pct(r.prob)} עלו 30% תוך 3 חודשים לפני שירדו לסטופ. הממוצע של כל המניות: ${pct(r.prob_base)}.</p>
+          <p class="muted small" style="margin:6px 0 0">זה סיכוי, לא הבטחה: גם כשהסיכוי טוב, ברוב המקרים המניה לא תגיע ל־30%. לכן הסטופ וגודל הפוזיציה חשובים. איך המודל נבדק – בלשונית ביצועים.</p></div>` : ''}
         <div class="card"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px"><h3>מחיר</h3>
           <div class="seg" role="group" aria-label="תקופה">${[[21, 'חודש'], [63, '3 חודשים'], [130, '6 חודשים']].map(([p, l]) => `<button data-period="${p}" aria-pressed="${p === period}">${l}</button>`).join('')}</div></div>
           ${chartSlot('chart', { series: [{ v, color: 'var(--accent)', area: true, name: '' }], refs: plan.stop ? [{ y: plan.stop, label: 'סטופ', color: 'var(--bad)' }] : [], height: 210, tip: true,
@@ -555,8 +618,8 @@
           <p class="muted small" style="margin:0">המפתח נשמר רק בטלפון הזה.</p>`}
         </div>
         ${cloudReady() ? `<div class="card stack" style="gap:10px"><h3>הפעלה ידנית</h3>
-          <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn ghost" data-run="scan">הרץ סריקה עכשיו</button><button class="btn ghost" data-run="backtest">הרץ בדיקה לאחור</button><button class="btn ghost" data-run="test-alert">שלח הודעת בדיקה</button></div>
-          <p class="muted small" style="margin:0">סריקה מלאה לוקחת 30 עד 60 דקות. אפשר לסגור את האפליקציה בינתיים.</p></div>` : ''}
+          <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn ghost" data-run="scan">הרץ סריקה עכשיו</button><button class="btn ghost" data-run="backtest">הרץ בדיקה לאחור</button><button class="btn ghost" data-run="train">אמן את מודל הסיכוי</button><button class="btn ghost" data-run="test-alert">שלח הודעת בדיקה</button></div>
+          <p class="muted small" style="margin:0">סריקה מלאה או אימון של המודל לוקחים 30 עד 60 דקות. אפשר לסגור את האפליקציה בינתיים. המודל מתאמן לבד פעם בחודש.</p></div>` : ''}
         <div class="card stack" style="gap:8px"><h3>התקנה על מסך הבית</h3>${install}
           <p style="margin:0"><b>אנדרואיד (Chrome):</b> תפריט ⋮ למעלה, ואז "התקנת אפליקציה" או "הוספה למסך הבית".</p>
           <p style="margin:0"><b>אייפון (Safari):</b> כפתור השיתוף (ריבוע עם חץ), ואז "הוסף למסך הבית".</p></div>
@@ -580,7 +643,7 @@
           <p style="margin:0">בטלגרם פתח שיחה עם <span class="kbd">@BotFather</span>, שלח <span class="kbd">/newbot</span> ובחר שם. תקבל טוקן. שלח הודעה כלשהי לבוט החדש, ואז פתח בדפדפן <span class="kbd">api.telegram.org/bot&lt;הטוקן&gt;/getUpdates</span> והעתק את המספר שמופיע אחרי <span class="kbd">"chat":{"id":</span>.</p>
           <p style="margin:0">ב־GitHub הוסף שני Secrets כמו בשלב 4: <span class="kbd">TELEGRAM_BOT_TOKEN</span> ו־<span class="kbd">TELEGRAM_CHAT_ID</span>. מעכשיו תקבל כל בוקר סיכום של הבחירות.</p></div>
         <div class="card stack" style="gap:6px"><h3>על המערכת</h3>
-          <p style="margin:0" class="small">מחירים, אנליסטים, שורט, אופציות וחדשות – Yahoo Finance · קניות מנהלים – SEC · מאקרו – FRED · מלחמות ומתיחות – GDELT · מדינות – IMF והבנק העולמי · חוזים ממשלתיים – USASpending.gov</p>
+          <p style="margin:0" class="small">מחירים, אנליסטים, שורט, אופציות וחדשות – Yahoo Finance · קניות מנהלים ותאריכי דוחות – SEC · מאקרו – FRED · מלחמות ומתיחות – GDELT · מדינות – IMF והבנק העולמי · חוזים ממשלתיים – USASpending.gov</p>
           <p style="margin:0" class="small muted">המערכת היא כלי עזר לסינון ולמחקר, לא ייעוץ השקעות. ציון גבוה פירושו סיכוי טוב מהממוצע לפי הנתונים, לא הבטחה. מניות עם פוטנציאל לעלייה חדה יכולות גם לרדת חדה.</p></div>
       </div>`;
   }
@@ -674,6 +737,9 @@
       state.tab = 'search';
       render();
       findTicker(sym);
+    } else if (job.mode === 'train') {
+      toast('המודל אומן. סריקה חדשה עם הסיכויים מתחילה לבד ותסתיים בעוד כשעה.');
+      state.tab = 'perf'; render();
     } else toast(job.mode === 'test-alert' ? 'הודעת הבדיקה נשלחה' : 'ההרצה הסתיימה והנתונים עודכנו');
   }
 

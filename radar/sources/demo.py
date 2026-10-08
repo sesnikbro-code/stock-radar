@@ -86,7 +86,7 @@ class DemoSources:
     def cik_lookup(self):
         return {u["ticker"]: u for u in self.universe()}
 
-    def prices(self, tickers, period="2y"):
+    def prices(self, tickers, period="2y", use_cache=True):
         years = int(str(period).rstrip("y")) if str(period).endswith("y") else 2
         end = self.index[self.cut - 1]
         start = end - pd.DateOffset(years=years)
@@ -180,6 +180,57 @@ class DemoSources:
                             "transactions": [{"date": self.today - timedelta(days=int(rng.integers(2, 80))),
                                               "code": "S", "shares": 20_000.0, "price": price, "ad": "D"}]})
         return filings
+
+    def insider_history(self, years, ciks=None, log_fn=None):
+        """Synthetic insider trades over the whole demo history. Buys are more likely while a stock's hidden
+        drift is positive, so the training code has something real to find."""
+        rows = []
+        close = self.panel["Close"]
+        for i, t in enumerate(self.tickers):
+            cik = 1000 + i
+            if ciks is not None and cik not in ciks:
+                continue
+            rng = np.random.default_rng(cik * 7 + 3)
+            mu = self.mu[t]
+            for p in range(5, self.cut, 5):
+                q = float(np.clip(mu[p] / 0.002, -1, 1))
+                d = self.index[p].date()
+                if rng.random() < 0.004 + 0.05 * max(q, 0):
+                    n = 1 + int(rng.random() < 0.3 + 0.4 * max(q, 0))
+                    for k in range(n):
+                        top = k == 0 and rng.random() < 0.5
+                        sh = float(rng.integers(2_000, 60_000))
+                        rows.append({"cik": cik, "filing_date": d, "date": d - timedelta(days=2), "code": "P",
+                                     "shares": sh, "price": float(close[t].iloc[p]), "ad": "A",
+                                     "shares_after": sh * float(rng.uniform(1.5, 12)), "owner": f"Insider {k + 1}",
+                                     "title": "CEO" if top else "Director", "is_officer": top, "is_director": not top,
+                                     "is_ten_pct": False, "planned": False, "top_exec": top})
+                if rng.random() < 0.02:
+                    rows.append({"cik": cik, "filing_date": d, "date": d - timedelta(days=2), "code": "S",
+                                 "shares": 20_000.0, "price": float(close[t].iloc[p]), "ad": "D",
+                                 "shares_after": 50_000.0, "owner": "Insider 9", "title": "EVP", "is_officer": True,
+                                 "is_director": False, "is_ten_pct": False, "planned": rng.random() < 0.6,
+                                 "top_exec": False})
+        if log_fn:
+            log_fn("demo", len(rows))
+        return pd.DataFrame(rows)
+
+    def earnings_events(self, ticker, cik, details=None, since=None, yahoo=True, http=None):
+        """Synthetic quarterly reports every ~63 trading days; the surprise follows the hidden drift."""
+        if ticker not in self.mu:
+            return None
+        i = self.tickers.index(ticker)
+        rng = np.random.default_rng(i * 13 + 5)
+        mu = self.mu[ticker]
+        since = since or self.today - timedelta(days=200)
+        rows = []
+        for p in range(10 + i % 63, self.cut, 63):
+            d = self.index[p].date()
+            if d < since:
+                continue
+            sur = float(np.clip(mu[p] / 0.002 * 0.15 + rng.normal(0.02, 0.08), -1, 1))
+            rows.append({"date": d, "surprise": sur if rng.random() < 0.8 else np.nan})
+        return pd.DataFrame(rows, columns=["date", "surprise"])
 
     def insider_discovery(self, days, max_filings):
         best = sorted(self.tickers, key=lambda t: -self._quality(t))[:3]

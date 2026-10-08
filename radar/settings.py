@@ -77,6 +77,8 @@ DEFAULTS: dict = {
         "geopolitics": 0.5,
         "macro": 0.5,
         "country": 0.4,
+        "earnings_drift": 1.0,
+        "model": 2.0,
     },
     "risk": {
         "account_size": 50_000,
@@ -111,6 +113,20 @@ DEFAULTS: dict = {
         "max_tickers": 1500,
     },
     "alerts": {"max_items": 10, "send_when_empty": True},
+    "train": {
+        "enabled": True,
+        "years": 5,                 # years of history to learn from
+        "max_tickers": 1000,        # stocks sampled across the market (big and small)
+        "step_days": 5,             # one snapshot per week
+        "target": 0.30,             # the question: +30% ...
+        "horizon_days": 63,         # ... within 3 months, before the stop (risk.atr_stop_multiple x ATR)
+        "folds": 5,
+        "l2": 0.001,
+        "earnings_yahoo_max": 800,  # stocks for which EPS surprises are fetched from Yahoo
+        "yahoo_minutes": 20,
+        "workers": 4,
+        "retrain_days": 30,         # the cloud retrains automatically when the model is older than this
+    },
 }
 
 SECRET_KEYS = [

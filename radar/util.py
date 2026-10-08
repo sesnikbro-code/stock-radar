@@ -77,6 +77,7 @@ class TickerData:
     news: list[dict] = field(default_factory=list)
     beta: float | None = None
     options_history: list[float] = field(default_factory=list)
+    earnings: pd.DataFrame | None = None   # past quarterly reports: date, surprise
 
 
 @dataclass

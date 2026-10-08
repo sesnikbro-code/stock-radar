@@ -2,7 +2,7 @@
 # Saves the results after each cloud run:
 #   1. app data (docs/data) and, on first install, the app code -> main branch
 #   2. the journal database -> 'radar-data' branch (one commit, force-pushed, so the repository stays small)
-#   3. after the first install, starts the first real scan
+#   3. starts the next run when needed (first scan, model training)
 set -uo pipefail
 cd "$(dirname "$0")/.."
 MODE="$(cat .radar_mode 2>/dev/null || echo scan)"
@@ -28,7 +28,16 @@ if [ -f data/journal.sqlite ]; then
   git push -q -f origin "$commit:refs/heads/radar-data" || echo "warning: could not save the journal"
 fi
 
+# chain the next run (only one per run, so runs never cancel each other):
+#   first install -> first scan;  daily scan or update -> train the probability model when it is missing or old;
+#   successful training -> a fresh scan, so the app shows the new probabilities right away
 if [ "$MODE" = setup ] && [ ! -f docs/data/latest.json ]; then
   gh workflow run radar.yml -f mode=scan || echo "warning: could not start the first scan - run it from the app or the Actions tab"
+elif [ "$MODE" = train ]; then
+  if [ "$(cat .radar_rc 2>/dev/null)" = 0 ]; then
+    gh workflow run radar.yml -f mode=scan || echo "warning: could not start the scan after training"
+  fi
+elif { [ "$MODE" = scan ] || [ "$MODE" = setup ]; } && [ "$(python3 ci/need_train.py 2>/dev/null)" = yes ]; then
+  gh workflow run radar.yml -f mode=train || echo "warning: could not start model training"
 fi
 exit 0

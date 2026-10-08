@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Runs inside GitHub Actions (called from .github/workflows/radar.yml).
-# Modes: setup (first install or update: starts the first real scan), scan, ticker, backtest, test-alert.
+# Modes: setup (first install or update: starts the first real scan), scan, ticker, backtest, train, test-alert.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
@@ -37,13 +37,21 @@ if git fetch -q --depth=1 origin radar-data 2>/dev/null; then
   git show FETCH_HEAD:journal.sqlite > data/journal.sqlite 2>/dev/null || rm -f data/journal.sqlite
 fi
 
+# keep the cloud cache small: old daily price files and stale downloads are not needed
+if [ -d data/cache ]; then
+  find data/cache -name 'prices_*.pkl' -mtime +1 -delete 2>/dev/null || true
+  find data/cache -type f -mtime +60 -delete 2>/dev/null || true
+fi
+
 rc=0
 case "$MODE" in
   setup)
     # first install or update: no demo data in the cloud, only real scans
     rm -rf docs/data/demo
     mkdir -p docs/data
-    if [ -f docs/data/latest.json ]; then
+    if [ -f docs/data/latest.json ] && [ ! -f docs/data/model.json ]; then
+      msg="העדכון הותקן בהצלחה. עכשיו מתחיל אימון של מודל הסיכוי על 5 שנות היסטוריה אמיתית (כ-30 עד 60 דקות), ואחריו סריקה חדשה."
+    elif [ -f docs/data/latest.json ]; then
       msg="העדכון הותקן בהצלחה."
     else
       msg="ההתקנה הסתיימה. הסריקה הראשונה של מניות אמיתיות התחילה ותסתיים בעוד כ-30 עד 60 דקות."
@@ -61,6 +69,10 @@ case "$MODE" in
   backtest)
     python run.py --export docs/data backtest || rc=$?
     ;;
+  train)
+    date -u +%F > docs/data/model_attempt.txt
+    python run.py --export docs/data train || rc=$?
+    ;;
   test-alert)
     python run.py --export docs/data test-alert || rc=$?
     ;;
@@ -69,4 +81,5 @@ case "$MODE" in
     exit 1
     ;;
 esac
+echo "$rc" > .radar_rc
 exit "$rc"

@@ -8,3 +8,4 @@ reports/
 .radar_setup
 .radar_mode
 *.zip
+.radar_rc

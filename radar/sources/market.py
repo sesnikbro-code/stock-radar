@@ -11,7 +11,7 @@ import importlib
 import logging
 import pickle
 import time
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import numpy as np
@@ -20,6 +20,7 @@ import pandas as pd
 log = logging.getLogger("radar.market")
 
 FIELDS = ["Open", "High", "Low", "Close", "Volume"]
+YF_PERIODS = {"1d", "5d", "1mo", "3mo", "6mo", "1y", "2y", "5y", "10y", "ytd", "max"}
 
 
 def _safe(fn, default=None):
@@ -93,6 +94,40 @@ def parse_calendar(cal) -> date | None:
     return min(future) if future else (max(dates) if dates else None)
 
 
+def normalize_earnings(df) -> pd.DataFrame | None:
+    """Past quarterly reports from Ticker.get_earnings_dates(): DataFrame[date, surprise] (surprise as a fraction,
+    NaN when unknown). None when Yahoo returned nothing."""
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return None
+    cols = {str(c).lower(): c for c in df.columns}
+    find = lambda *keys: next((cols[c] for c in cols if all(k in c for k in keys)), None)  # noqa: E731
+    c_sur, c_est, c_rep = find("surprise"), find("estimate"), find("reported")
+    idx = df.index
+    if not isinstance(idx, pd.DatetimeIndex):
+        dcol = find("date")
+        if dcol is None:
+            return None
+        idx = pd.DatetimeIndex(pd.to_datetime(df[dcol], errors="coerce", utc=True))
+    if idx.tz is not None:
+        idx = idx.tz_convert("America/New_York").tz_localize(None)
+    rep = pd.to_numeric(df[c_rep], errors="coerce").to_numpy() if c_rep is not None else np.full(len(df), np.nan)
+    est = pd.to_numeric(df[c_est], errors="coerce").to_numpy() if c_est is not None else np.full(len(df), np.nan)
+    sur = pd.to_numeric(df[c_sur], errors="coerce").to_numpy() / 100 if c_sur is not None else np.full(len(df), np.nan)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        calc = np.where(np.abs(est) > 0.01, (rep - est) / np.abs(est), np.nan)
+    sur = np.where(np.isnan(sur), calc, sur)
+    today = date.today()
+    rows = []
+    for d, s_, r_ in zip(idx, sur, rep):
+        if pd.isna(d):
+            continue
+        d = d.date()
+        if d < today or (d == today and not np.isnan(r_)):  # only reports that already happened
+            rows.append({"date": d, "surprise": float(s_) if not np.isnan(s_) else np.nan})
+    out = pd.DataFrame(rows, columns=["date", "surprise"])
+    return out.drop_duplicates("date").sort_values("date").reset_index(drop=True)
+
+
 def to_panel(df: pd.DataFrame, tickers: list[str]) -> dict[str, pd.DataFrame]:
     """Convert yf.download output into {field: wide DataFrame (dates x tickers)}."""
     panel = {}
@@ -145,14 +180,18 @@ class YahooMarket:
         if use_cache and cpath.exists():
             with open(cpath, "rb") as fh:
                 return pickle.load(fh)
+        span = {"period": period}
+        if period not in YF_PERIODS:  # Yahoo only accepts a few period names: use a start date instead (e.g. 6y)
+            years = float(str(period).rstrip("y")) if str(period).endswith("y") else 2.0
+            span = {"start": (date.today() - timedelta(days=int(years * 365.25) + 5)).isoformat()}
         panels = []
         for i in range(0, len(tickers), chunk):
             batch = tickers[i:i + chunk]
             log.info("מוריד מחירים %d-%d מתוך %d...", i + 1, i + len(batch), len(tickers))
             for attempt in range(3):
                 try:
-                    df = self.yf.download(batch, period=period, interval="1d", auto_adjust=True,
-                                          group_by="column", threads=True, progress=False)
+                    df = self.yf.download(batch, interval="1d", auto_adjust=True, group_by="column",
+                                          threads=True, progress=False, **span)
                     panels.append(to_panel(df, batch))
                     break
                 except Exception as e:  # noqa: BLE001
@@ -189,6 +228,17 @@ class YahooMarket:
         return {"call_vol": call_vol, "put_vol": put_vol, "call_oi": call_oi, "put_oi": put_oi,
                 "otm_call_vol": otm_call_vol, "atm_iv": float(np.median(ivs)) if ivs else None}
 
+    def earnings_history(self, ticker: str, limit: int = 24) -> pd.DataFrame | None:
+        """Past report dates and EPS surprises (about 6 years with limit=24). None if Yahoo has nothing."""
+        t = self.yf.Ticker(ticker)
+        for attempt in range(2):
+            try:
+                return normalize_earnings(t.get_earnings_dates(limit=limit))
+            except Exception as e:  # noqa: BLE001
+                log.debug("earnings history failed %s: %s", ticker, e)
+                time.sleep(3 * (attempt + 1))
+        return None
+
     def details(self, ticker: str, price: float | None = None, want_options: bool = True) -> dict:
         t = self.yf.Ticker(ticker)
         info = {}
@@ -207,6 +257,7 @@ class YahooMarket:
             "eps_revisions": _safe(lambda: t.eps_revisions),
             "price_targets": _safe(lambda: t.analyst_price_targets, {}) or {},
             "insider_yahoo": _safe(lambda: t.insider_transactions),
+            "earnings_hist": normalize_earnings(_safe(lambda: t.get_earnings_dates(limit=8))),
         }
         d["options"] = self._options_summary(t, price) if want_options else None
         return d

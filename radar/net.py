@@ -122,5 +122,33 @@ class Http:
     def get(self, url: str, **kw):
         return self.request(url, method="GET", **kw)
 
+    def get_bytes(self, url: str, cache_name: str | None = None, timeout: int = 300, retries: int = 3) -> bytes | None:
+        """Download a binary file (e.g. a zip), cached forever on disk. None on 404/403."""
+        host = urlparse(url).netloc
+        d = self.cache_dir / host.replace(":", "_") / "bin"
+        d.mkdir(parents=True, exist_ok=True)
+        cpath = d / (cache_name or hashlib.sha1(url.encode()).hexdigest())
+        if cpath.exists() and cpath.stat().st_size > 0:
+            return cpath.read_bytes()
+        last_err: Exception | None = None
+        for attempt in range(retries + 1):
+            self._throttle(host)
+            try:
+                r = self.session.get(url, timeout=timeout)
+            except requests.RequestException as e:
+                last_err = e
+                time.sleep(min(30, 2 ** attempt))
+                continue
+            if r.status_code in (403, 404):
+                return None
+            if r.status_code in (429, 500, 502, 503, 504):
+                last_err = requests.HTTPError(f"{r.status_code} for {url}")
+                time.sleep(min(60, 3 * (2 ** attempt)))
+                continue
+            r.raise_for_status()
+            cpath.write_bytes(r.content)
+            return r.content
+        raise last_err if last_err else RuntimeError(f"download failed: {url}")
+
     def post_json(self, url: str, body: dict, **kw):
         return self.request(url, method="POST", json_body=body, as_json=True, **kw)

@@ -5,14 +5,18 @@ from __future__ import annotations
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, time, timezone
+from pathlib import Path
 
 import pandas as pd
 
+from .features import live_features
 from .journal import Journal
+from .model import ProbModel, probability_signal
 from .scoring import composite, expected_move_3m, position_plan, risk_score
 from .signals import SIGNAL_LABELS
 from .signals.analysts import (firm_accuracy, firm_calls_from_history, normalize_upgrades, ratings_signal,
                                revisions_signal, target_signal)
+from .signals.earnings import earnings_drift_signal
 from .signals.context import (compute_beta, compute_regime, country_signal, geopolitics_signal, gov_signal,
                               macro_signal, score_country)
 from .signals.flows import options_signal, short_squeeze_signal
@@ -92,6 +96,10 @@ def fetch_ticker(src, settings, t: str, meta: dict, tech: dict, panel, spy, disc
             td.gov = src.gov_contracts(name, settings.get("gov_contracts.lookback_days"))
         except Exception as e:  # noqa: BLE001
             log.debug("gov contracts failed %s: %s", t, e)
+    try:
+        td.earnings = src.earnings_events(t, td.cik, det)
+    except Exception as e:  # noqa: BLE001
+        log.debug("earnings events failed %s: %s", t, e)
     if spy is not None and "Close" in prices:
         td.beta = compute_beta(prices["Close"].dropna(), spy)
     return td
@@ -179,11 +187,22 @@ def build_context(src, settings, panel, today, candidates_info: list[TickerData]
 SPARK_DAYS = 130
 
 
+def load_model(settings, demo: bool, model_path: Path | None) -> ProbModel | None:
+    path = Path(model_path) if model_path else settings.data_dir / ("model_demo.json" if demo else "model.json")
+    m = ProbModel.load(path) if path.exists() else None
+    if m is not None and bool(m.meta.get("demo")) != bool(demo):
+        return None  # never mix a demo model with real data (or the other way round)
+    return m
+
+
 def run_scan(settings, demo: bool = False, tickers: list[str] | None = None, progress=None,
-             asof: date | None = None) -> dict:
+             asof: date | None = None, model_path: Path | None = None) -> dict:
     """Run the full daily scan. `tickers` restricts the scan to a list (single-stock analysis).
     `asof` replays a past day and is only supported by the demo source."""
     src = get_sources(settings, demo, asof)
+    model = load_model(settings, demo, model_path)
+    if model is not None:
+        log.info("מודל הסיכוי נטען (אומן %s)", str(model.meta.get("trained", ""))[:10])
     today = asof or date.today()
     journal = Journal(settings.data_dir / ("journal_demo.sqlite" if demo else "journal.sqlite"))
     filters, weights_cfg = settings.get("filters"), settings.get("weights")
@@ -260,6 +279,8 @@ def run_scan(settings, demo: bool = False, tickers: list[str] | None = None, pro
     # 4. context + signals -------------------------------------------------------
     ctx = build_context(src, settings, panel, today, tds, journal)
     weights, factors = effective_weights(settings, journal)
+    if model is None or model.quality <= 0:
+        weights["model"] = 0.0  # no tested model yet: don't let its empty slot dilute the other signals
     spark_idx = panel["Close"].index[-SPARK_DAYS:]
     results = []
     for td in tds:
@@ -268,6 +289,15 @@ def run_scan(settings, demo: bool = False, tickers: list[str] | None = None, pro
             td.options_history = journal.option_history(td.ticker, today)
             journal.add_option_volume(td.ticker, today, (opt.get("call_vol") or 0) + (opt.get("put_vol") or 0))
         sigs = build_signals(td, ctx, settings)
+        prob = None
+        try:
+            feats = live_features(td.tech, td.insider_rows, td.earnings, td.prices["Close"], spy, today)
+            sigs["earnings_drift"] = earnings_drift_signal(feats)
+            if model is not None and model.quality > 0:  # only a model that passed its out-of-sample test
+                prob = model.predict(feats)
+                sigs["model"] = probability_signal(prob, model)
+        except Exception as e:  # noqa: BLE001
+            log.warning("חישוב מודל הסיכוי נכשל עבור %s: %s", td.ticker, e)
         upside, coverage = composite(sigs, weights)
         risk, risk_reasons = risk_score(td, sigs, filters)
         atr = num(td.tech.get("atr14"))
@@ -279,6 +309,7 @@ def run_scan(settings, demo: bool = False, tickers: list[str] | None = None, pro
             "sector": td.info.get("sector", ""), "industry": td.info.get("industry", ""),
             "country": td.info.get("country", ""), "market_cap": num(td.info.get("marketCap")),
             "earnings_date": td.details.get("earnings_date"), "insider_source": td.insider_source,
+            "prob": prob, "prob_base": model.base if model is not None and prob is not None else None,
             "closes": [None if pd.isna(v) else round(float(v), 4)
                        for v in panel["Close"][td.ticker].reindex(spark_idx).values],
             "pick": False,
@@ -312,4 +343,14 @@ def run_scan(settings, demo: bool = False, tickers: list[str] | None = None, pro
     return {"date": today, "ctx": ctx, "results": results, "picks": picks, "weights": weights, "factors": factors,
             "learning": learning, "paper": paper, "n_universe": len(meta), "n_screened": len(tech_df),
             "n_deep": len(tds), "demo": demo, "single": bool(tickers),
+            "model": _model_summary(model),
             "spark_dates": [d.strftime("%Y-%m-%d") for d in spark_idx]}
+
+
+def _model_summary(model: ProbModel | None) -> dict | None:
+    if model is None:
+        return None
+    v = model.meta.get("validation") or {}
+    return {"trained": model.meta.get("trained"), "base": model.base, "auc": v.get("auc"),
+            "top_rate": v.get("top_rate"), "top_lift": v.get("top_lift"), "quality": model.quality,
+            "target": model.meta.get("target"), "horizon": model.meta.get("horizon")}

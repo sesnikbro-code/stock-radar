@@ -85,6 +85,8 @@ def he_country(c: str | None) -> str:
 def _card(r: dict, show_titles: bool) -> str:
     plan = r.get("plan") or {}
     facts = [f"מחיר <b>{r['price']:.2f}$</b>"]
+    if r.get("prob") is not None and r.get("prob_base"):
+        facts.insert(0, f"סיכוי לעלות 30% לפני הסטופ <b>{r['prob']:.0%}</b> (ממוצע {r['prob_base']:.0%})")
     if plan.get("stop"):
         facts.append(f"סטופ מוצע <b>{plan['stop']:.2f}$</b> (<bdi>{pct(plan['stop_pct'])}</bdi>)")
     if plan.get("shares"):
@@ -249,6 +251,8 @@ def alert_text(res: dict, max_items: int = 10) -> str:
         if plan.get("stop"):
             line += f", סטופ מוצע {plan['stop']:.2f}$"
         lines.append(line)
+        if r.get("prob") is not None and r.get("prob_base"):
+            lines.append(f"סיכוי לעלות 30% לפני הסטופ: {r['prob']:.0%} (ממוצע {r['prob_base']:.0%})")
         for p in r["why"]["pros"][:3]:
             lines.append(f"- {p}")
         warn = (r["why"]["cons"] + r.get("risk_reasons", []))[:1]

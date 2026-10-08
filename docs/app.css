@@ -245,3 +245,23 @@ ol.steps li::marker { font-weight: 700; color: var(--accent); }
 .empty { text-align: center; color: var(--muted); padding: 24px 8px; }
 @media (prefers-reduced-motion: reduce) { .sweep, .pulse { animation: none; } .pick:active { transform: none; } }
 @media (min-width: 560px) { .facts { grid-template-columns: repeat(3, 1fr); } }
+
+/* chance from the probability model */
+.chip.accent { background: var(--accent-soft); color: var(--accent); }
+.prob { display: flex; flex-direction: column; gap: 5px; margin: 10px 0; padding: 10px 12px; border-radius: 12px; background: var(--surface-2); }
+.prob-top { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; font-size: 14px; font-weight: 600; }
+.prob-top b { font: 600 20px/1 var(--font-data); color: var(--ink); }
+.prob.good .prob-top b { color: var(--good); }
+.prob.bad .prob-top b { color: var(--bad); }
+.prob-track { position: relative; height: 8px; border-radius: 99px; background: var(--surface); overflow: visible; }
+.prob-track i { position: absolute; inset-block: 0; inset-inline-start: 0; border-radius: 99px; background: var(--accent); }
+.prob.good .prob-track i { background: var(--good); }
+.prob.bad .prob-track i { background: var(--bad); }
+.prob-track .base { position: absolute; top: -4px; bottom: -4px; width: 2px; margin-inline-start: -1px; background: var(--ink-2); border-radius: 2px; }
+.prob-sub { font-size: 12.5px; color: var(--muted); }
+.dec { display: flex; align-items: flex-end; gap: 4px; height: 120px; padding-top: 16px; }
+.dec-col { flex: 1; height: 100%; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; gap: 3px; min-width: 0; }
+.dec-col i { display: block; width: 100%; border-radius: 4px 4px 0 0; background: var(--accent); opacity: .85; }
+.dec-col:last-child i, .dec-col:nth-last-child(2) i { background: var(--good); opacity: 1; }
+.dec-v { font: 500 9.5px/1 var(--font-data); color: var(--muted); white-space: nowrap; }
+.dec-axis { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); margin-top: 4px; }

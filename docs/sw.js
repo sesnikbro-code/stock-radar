@@ -1,6 +1,6 @@
 /* Offline support: app files are served from cache and refreshed in the background;
    data files are fetched fresh and fall back to the last saved copy when offline. */
-const SHELL = 'radar-shell-v1';
+const SHELL = 'radar-shell-v2';
 const DATA = 'radar-data-v1';
 const FILES = ['./', 'index.html', 'app.css', 'app.js', 'workflow.js', 'manifest.webmanifest',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png'];
