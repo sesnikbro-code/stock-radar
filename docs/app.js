@@ -98,7 +98,8 @@
     const [status, latest] = await Promise.all([getJSON('status.json'), getJSON('latest.json')]);
     state.status = status;
     if (latest) { state.data = latest; state.demo = false; state.index = await getJSON('index.json'); }
-    else { state.data = await getJSON('demo/latest.json'); state.demo = !!state.data; state.index = null; }
+    else if (PREVIEW) { state.data = await getJSON('demo/latest.json'); state.demo = !!state.data; state.index = null; }
+    else { state.data = null; state.demo = false; state.index = null; }  // the real app never shows demo data
     state.viewing = null;
     state.backtest = undefined;
     state.tickers = undefined;
@@ -255,7 +256,7 @@
     const st = state.status;
     if (st && st.ok === false) {
       out.push(banner('bad', 'הריצה האחרונה בענן נכשלה', `${st.message || ''} (${ago(st.finished)})`));
-    } else if (st && st.ok && st.mode === 'setup' && state.demo) {
+    } else if (st && st.ok && st.mode === 'setup' && !state.data) {
       out.push(banner('good', 'ההתקנה הצליחה', st.message));
     }
     if (state.viewing) {
@@ -294,7 +295,12 @@
   function viewToday() {
     const d = state.data;
     if (state.loading) return loader();
-    if (!d) return `${statusBanners()}<div class="card empty"><h3>עדיין אין נתונים</h3><p>הסריקה הראשונה עוד לא הסתיימה. אם עברה יותר משעה, פתח את ההגדרות ובדוק את מדריך ההקמה.</p></div>`;
+    if (!d) {
+      return `<div class="stack">${statusBanners()}<div class="card empty"><div class="loader" style="padding:16px 0"><div class="sweep"></div></div>
+        <h3>הסריקה הראשונה עוד לא הסתיימה</h3>
+        <p>המערכת סורקת עכשיו מניות אמיתיות בבורסה האמריקאית: מחירים, קניות מנהלים, אנליסטים, חדשות, מלחמות ומאקרו. בפעם הראשונה זה לוקח 30 עד 60 דקות. אחר כך הסריקה רצה לבד כל בוקר.</p>
+        <p class="small">אם עברו יותר משעתיים ועדיין אין תוצאות, בדוק את לשונית Actions במאגר ב־GitHub.</p></div></div>`;
+    }
     const res = d.results || [];
     const picks = res.map((r, i) => [r, i]).filter(([r]) => r.pick);
     const watch = res.map((r, i) => [r, i]).filter(([r]) => !r.pick).slice(0, 12);
@@ -566,7 +572,7 @@
               <div class="muted small" id="copy-msg" aria-live="polite"></div>
               <pre class="code" id="wf">${esc(WORKFLOW)}</pre></li>
             <li><span class="kbd">Add file</span> ואז <span class="kbd">Upload files</span>. בחר את קובץ ה־zip של רדאר המניות שהורדת לטלפון ולחץ <span class="kbd">Commit changes</span>. זה מפעיל את ההתקנה.</li>
-            <li>חכה כ־5 דקות. בלשונית <span class="kbd">Actions</span> תופיע ריצה עם וי ירוק. פתח בדפדפן <span class="kbd">https://שם-המשתמש.github.io/stock-radar</span>. בהתחלה יוצגו נתוני דמו, והסריקה האמיתית הראשונה תסתיים תוך כשעה. אם לא הופיעה ריצה, או שהיא נכשלה: ודא את שלב 3, ואז <span class="kbd">Actions</span>, <span class="kbd">radar</span>, <span class="kbd">Run workflow</span>.</li>
+            <li>חכה כ־5 דקות. בלשונית <span class="kbd">Actions</span> תופיע ריצה עם וי ירוק. פתח בדפדפן <span class="kbd">https://שם-המשתמש.github.io/stock-radar</span>. בהתחלה תופיע הודעה שהסריקה הראשונה רצה, ואחרי כשעה יופיעו המניות. אם לא הופיעה ריצה, או שהיא נכשלה: ודא את שלב 3, ואז <span class="kbd">Actions</span>, <span class="kbd">radar</span>, <span class="kbd">Run workflow</span>.</li>
             <li>התקן את האפליקציה על מסך הבית (ההוראות למעלה).</li>
             <li>לא חובה: כדי להפעיל ניתוחים מהטלפון, צור מפתח: בתמונת הפרופיל ב־GitHub <span class="kbd">Settings</span>, <span class="kbd">Developer settings</span>, <span class="kbd">Personal access tokens</span>, <span class="kbd">Fine-grained tokens</span>, <span class="kbd">Generate new token</span>. ב־Repository access בחר רק את <span class="kbd">stock-radar</span>, ובהרשאות תן ל־<span class="kbd">Actions</span> את <span class="kbd">Read and write</span>. העתק את המפתח והדבק אותו למעלה בחיבור לענן.</li>
           </ol></div>

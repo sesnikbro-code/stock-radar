@@ -14,6 +14,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from .journal import spearman
 from .report import CSS, e
 from .signals.technical import compute_panel_features, eligibility, scores_at
 from .sources import get_sources
@@ -65,7 +66,7 @@ def simulate(panel: dict[str, pd.DataFrame], filters: dict, weights: dict, bt: d
         fr = fwd_ret.loc[t, sc.index].dropna()
         if len(fr) > 30:
             s = sc["tech_score"].reindex(fr.index)
-            ic = s.corr(fr, method="spearman")
+            ic = spearman(s, fr)
             if not np.isnan(ic):
                 ics.append(ic)
             dec = pd.qcut(s.rank(method="first"), 10, labels=False)

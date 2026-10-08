@@ -34,6 +34,15 @@ CREATE TABLE IF NOT EXISTS weights (signal TEXT PRIMARY KEY, factor REAL, ic REA
 HORIZONS = (30, 90)
 
 
+def spearman(x: pd.Series, y: pd.Series) -> float:
+    """Rank correlation without SciPy (Pearson correlation of the ranks)."""
+    rx, ry = x.rank(), y.rank()
+    if rx.std() == 0 or ry.std() == 0:
+        return 0.0
+    v = float(rx.corr(ry))
+    return 0.0 if np.isnan(v) else v
+
+
 class Journal:
     def __init__(self, path: Path):
         self.path = Path(path)
@@ -118,7 +127,7 @@ class Journal:
                 continue
             x = sc[mask].apply(lambda v: v[0]).astype(float)
             y = df.loc[mask, "excess"].astype(float)
-            ic = float(x.corr(y, method="spearman")) if x.std() > 0 and y.std() > 0 else 0.0
+            ic = spearman(x, y)
             ic = 0.0 if np.isnan(ic) else ic
             n = int(mask.sum())
             stats["signals"][name] = {"ic": ic, "n": n}
