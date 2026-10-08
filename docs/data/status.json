@@ -1,1 +1,1 @@
-{"mode":"backtest-demo","ok":false,"message":"שגיאה לא צפויה: ModuleNotFoundError: No module named 'scipy'","finished":"2026-10-08T15:31:23+00:00"}
+{"mode":"scan","ok":true,"message":"הסריקה היומית הסתיימה: 10 מניות נבחרו מתוך 107 שנבדקו לעומק","finished":"2026-10-08T15:56:24+00:00"}
