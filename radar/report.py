@@ -251,6 +251,9 @@ def alert_text(res: dict, max_items: int = 10) -> str:
     hot = [th["he"] for th in sorted(ctx.themes.values(), key=lambda x: -x["ratio"]) if th["ratio"] >= 1.25]
     if hot:
         lines.append("מוקדי מתיחות בעלייה: " + ", ".join(hot[:3]))
+    model = res.get("model") or {}
+    if not res.get("demo") and not model.get("passed"):
+        lines.append("המערכת עוד לא הוכיחה יתרון על המדד: זו רשימה לבדיקה ולתיק נייר, לא לקנייה.")
     lines.append("")
     picks = res["picks"][:max_items]
     if not picks:
@@ -272,6 +275,9 @@ def alert_text(res: dict, max_items: int = 10) -> str:
         if warn:
             lines.append(f"- שים לב: {warn[0]}")
         lines.append("")
+    excluded = [r for r in res["results"][:40] if r.get("exclude")][:5]
+    if excluded:
+        lines.append("סוננו: " + ", ".join(f"{r['ticker']} ({r['exclude']})" for r in excluded))
     p = res.get("paper") or {}
     if p.get("n"):
         lines.append(f"תיק על נייר: {pct(p.get('return_on_invested'), 1, True)} מאז {_d(p['since'])}"

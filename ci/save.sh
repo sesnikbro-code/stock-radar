@@ -30,6 +30,7 @@ fi
 
 # chain the next run (only one per run, so runs never cancel each other):
 #   first install -> first scan;  daily scan or update -> train the probability model when it is missing or old;
+#   update with a model that is still fresh -> a new scan with the new version;
 #   successful training -> a fresh scan, so the app shows the new probabilities right away
 if [ "$MODE" = setup ] && [ ! -f docs/data/latest.json ]; then
   gh workflow run radar.yml -f mode=scan || echo "warning: could not start the first scan - run it from the app or the Actions tab"
@@ -39,5 +40,8 @@ elif [ "$MODE" = train ]; then
   fi
 elif { [ "$MODE" = scan ] || [ "$MODE" = setup ]; } && [ "$(python3 ci/need_train.py 2>/dev/null)" = yes ]; then
   gh workflow run radar.yml -f mode=train || echo "warning: could not start model training"
+elif [ "$MODE" = setup ]; then
+  # an update: scan again right away, so the app shows what the new version checks
+  gh workflow run radar.yml -f mode=scan || echo "warning: could not start a scan after the update"
 fi
 exit 0

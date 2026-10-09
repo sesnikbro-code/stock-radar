@@ -218,6 +218,16 @@ def company_form4(http: Http, cik: int, lookback_days: int, max_filings: int = 4
     return out
 
 
+def company_filings(http: Http, cik: int, ttl: float = 6 * 3600) -> dict | None:
+    """The company's recent filing list (form, filingDate, items, ...). Same request and cache as the insider and
+    earnings checks, so this normally costs nothing extra. Includes filings where the company is the subject
+    (e.g. a tender offer or merger communication filed by a buyer)."""
+    subs = http.get(SUBMISSIONS_URL.format(cik=cik), as_json=True, ttl=ttl)
+    if not subs:
+        return None
+    return (subs.get("filings") or {}).get("recent") or None
+
+
 def _earnings_rows(block: dict, since: str) -> list[str]:
     forms, items, dates = block.get("form", []), block.get("items", []), block.get("filingDate", [])
     out = []

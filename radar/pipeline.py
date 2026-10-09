@@ -19,6 +19,7 @@ from .signals.analysts import (firm_accuracy, firm_calls_from_history, normalize
 from .signals.earnings import earnings_drift_signal
 from .signals.context import (compute_beta, compute_regime, country_signal, geopolitics_signal, gov_signal,
                               macro_signal, score_country)
+from .signals.deals import deal_check, events_signal, parse_filings
 from .signals.flows import options_signal, short_squeeze_signal
 from .signals.insider import insider_signal, yahoo_insider_rows
 from .signals.news import analyze_news, catalysts_signal
@@ -80,6 +81,12 @@ def fetch_ticker(src, settings, t: str, meta: dict, tech: dict, panel, spy, disc
             rows = yahoo_insider_rows(det.get("insider_yahoo"))
             source = "Yahoo" if rows else ""
         td.insider_rows, td.insider_source = rows, source
+    if td.cik and settings.get("deals.enabled", True):
+        try:  # same SEC filing list as the insider and earnings checks (cached), used for the takeover check
+            recent = src.filings(td.cik)
+            td.filings = parse_filings(recent) if recent is not None else None
+        except Exception as e:  # noqa: BLE001
+            log.debug("SEC filings failed for %s: %s", t, e)
     if settings.get("news.enabled"):
         news = list(det.get("news") or [])
         try:
@@ -129,6 +136,23 @@ def build_signals(td: TickerData, ctx: MarketContext, settings) -> dict[str, Sig
     sigs["macro"] = macro_signal(ctx.regime, td.beta, mcap, info.get("sector", ""))
     sigs["country"] = country_signal(info.get("country"), ctx.countries)
     return sigs
+
+
+DEAL_RISK = {"suspect": 15, "terminated": 10, "involved": 5}
+
+
+def corporate_events(td: TickerData, sigs: dict[str, SignalResult], today: date, enabled: bool = True) -> dict:
+    """Takeover check + risk from the company's SEC filings. Adds sigs['filings'] and returns the deal verdict."""
+    if not enabled:
+        return {"status": None, "exclude": False, "text": "", "short": ""}
+    closes = td.prices["Close"] if "Close" in td.prices else None
+    vols = td.prices["Volume"] if "Volume" in td.prices else None
+    deal = deal_check(td.filings or [], closes, td.news, td.ticker, td.name, today, vols)
+    ev = events_signal(td.filings, num(td.info.get("marketCap")), today, deal.get("status"))
+    ev.risk_add += DEAL_RISK.get(deal.get("status"), 0)
+    ev.data["checked"] = td.filings is not None
+    sigs["filings"] = ev
+    return deal
 
 
 def explain(sigs: dict[str, SignalResult], weights: dict) -> dict:
@@ -292,6 +316,7 @@ def run_scan(settings, demo: bool = False, tickers: list[str] | None = None, pro
             td.options_history = journal.option_history(td.ticker, today)
             journal.add_option_volume(td.ticker, today, (opt.get("call_vol") or 0) + (opt.get("put_vol") or 0))
         sigs = build_signals(td, ctx, settings)
+        deal = corporate_events(td, sigs, today, settings.get("deals.enabled", True))
         prob, hist = None, None
         try:
             feats = live_features(td.tech, td.insider_rows, td.earnings, td.prices["Close"], spy, today)
@@ -305,9 +330,23 @@ def run_scan(settings, demo: bool = False, tickers: list[str] | None = None, pro
         upside, coverage = composite(sigs, weights)
         risk, risk_reasons = risk_score(td, sigs, filters)
         atr = num(td.tech.get("atr14"))
+        why = explain(sigs, weights)
+        if deal.get("text"):
+            why["cons"].insert(0, deal["text"])
+        flags = list(sigs["filings"].data.get("flags", [])) if "filings" in sigs else []
+        exclude = deal.get("short") if deal.get("exclude") else ("פשיטת רגל" if "bankruptcy" in flags else None)
+        close, sma50 = num(td.tech.get("close")), num(td.tech.get("sma50"))
+        pt = td.details.get("price_targets") or {}
         results.append({
             "ticker": td.ticker, "name": td.name, "price": td.price, "upside": round(upside, 1),
-            "risk": round(risk, 1), "coverage": coverage, "signals": sigs, "why": explain(sigs, weights),
+            "risk": round(risk, 1), "coverage": coverage, "signals": sigs, "why": why,
+            "exclude": exclude, "flags": flags,
+            "deal": {k: deal.get(k) for k in ("status", "short", "text", "date", "forms", "jump", "base")}
+            if deal.get("status") else None,
+            "filings_checked": td.filings is not None,
+            "rsi": num(td.tech.get("rsi14")), "ext50": close / sma50 - 1 if close and sma50 else None,
+            "target_mean": num(pt.get("mean")) or num(td.info.get("targetMeanPrice")),
+            "n_analysts": num(td.info.get("numberOfAnalystOpinions")),
             "risk_reasons": risk_reasons, "plan": position_plan(td.price, atr, settings.get("risk")),
             "atr": atr, "move_3m": expected_move_3m(num(td.tech.get("atr_pct"))),
             "sector": td.info.get("sector", ""), "industry": td.info.get("industry", ""),
@@ -329,7 +368,12 @@ def run_scan(settings, demo: bool = False, tickers: list[str] | None = None, pro
     min_up = settings.get("scan.min_upside_score")
     if ctx.regime.get("risk_off"):
         max_picks, min_up = max(1, max_picks // 2), min_up + 5
-    picks = [r for r in results if r["upside"] >= min_up and r["risk"] <= settings.get("scan.max_risk_score")]
+    # stocks in a pending takeover (or bankrupt) are never picked: their upside is capped or gone
+    picks = [r for r in results if not r.get("exclude")
+             and r["upside"] >= min_up and r["risk"] <= settings.get("scan.max_risk_score")]
+    n_excl = sum(1 for r in results if r.get("exclude") and r["upside"] >= min_up)
+    if n_excl:
+        log.info("%d מניות סוננו כי הן בתהליך רכישה או בפשיטת רגל", n_excl)
     if settings.get("scan.require_model_edge") and model is not None and model.quality > 0:
         # stocks whose probability level lost money on average in the model's out-of-sample test are skipped
         n0 = len(picks)
@@ -355,7 +399,13 @@ def run_scan(settings, demo: bool = False, tickers: list[str] | None = None, pro
         if settings.get("learning.enabled"):
             learning = journal.learn(list(SIGNAL_LABELS), settings.get("learning"))
     journal.close()
+    health = {"n": len(tds), "news": sum(1 for td in tds if td.news),
+              "filings": sum(1 for td in tds if td.filings is not None),
+              "insider_sec": sum(1 for td in tds if td.insider_source == "SEC"),
+              "analysts": sum(1 for td in tds if td.details.get("eps_trend") is not None),
+              "options": sum(1 for td in tds if td.details.get("options"))}
     return {"date": today, "ctx": ctx, "results": results, "picks": picks, "weights": weights, "factors": factors,
+            "health": health,
             "learning": learning, "paper": paper, "n_universe": len(meta), "n_screened": len(tech_df),
             "n_deep": len(tds), "demo": demo, "single": bool(tickers),
             "model": _model_summary(model),
@@ -372,4 +422,7 @@ def _model_summary(model: ProbModel | None) -> dict | None:
             "passed": v.get("passed"), "target_mode": model.meta.get("target_mode"),
             "target": model.meta.get("target"), "target_r": model.meta.get("target_r"),
             "horizon": model.meta.get("horizon"), "stop_atr": model.meta.get("stop_atr"),
-            "top_ret": (money.get("model") or {}).get("ret"), "all_ret": (money.get("all") or {}).get("ret")}
+            "top_ret": (money.get("model") or {}).get("ret"), "all_ret": (money.get("all") or {}).get("ret"),
+            "spy_ret": (money.get("model") or {}).get("spy"), "top_win": (money.get("model") or {}).get("win"),
+            "top_stop": (money.get("model") or {}).get("stop"), "test_start": v.get("test_start"),
+            "test_end": v.get("test_end")}

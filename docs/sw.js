@@ -1,6 +1,6 @@
 /* Offline support. Everything is fetched fresh from the network first, so a new version of the app shows up
    on the next open; the last saved copy is used only when there is no connection. */
-const SHELL = 'radar-shell-v3';
+const SHELL = 'radar-shell-v4';
 const DATA = 'radar-data-v1';
 const FILES = ['./', 'index.html', 'app.css', 'app.js', 'workflow.js', 'manifest.webmanifest',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png'];

@@ -69,6 +69,10 @@ class LiveSources:
     def insider(self, cik: int, lookback_days: int) -> list[dict]:
         return sec.company_form4(self.http, cik, lookback_days)
 
+    def filings(self, cik: int) -> dict | None:
+        """SEC filing list of one company (for the takeover check and corporate events)."""
+        return sec.company_filings(self.http, int(cik))
+
     def insider_history(self, years: int, ciks: set[int] | None = None, log_fn=None):
         """Every open-market insider purchase/sale of the past years (SEC quarterly data sets)."""
         return sec.insider_history(self.train_http, years, ciks, log_fn)

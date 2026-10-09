@@ -58,6 +58,7 @@ DEFAULTS: dict = {
         "show_original_headlines": True,
     },
     "options": {"enabled": True, "max_expirations": 2},
+    "deals": {"enabled": True},       # takeover check + offerings/late reports/bankruptcy from SEC filings
     "gov_contracts": {"enabled": True, "lookback_days": 120, "max_market_cap": 30_000_000_000},
     "geopolitics": {"enabled": True},
     "macro": {"enabled": True},

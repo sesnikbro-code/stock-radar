@@ -74,7 +74,9 @@
     back: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>',
     cal: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="4" y="5" width="16" height="15" rx="2"/><path d="M4 10h16M9 3v4M15 3v4"/></svg>',
     refresh: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 5v6h-6"/></svg>',
+    help: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M9.6 9.4a2.5 2.5 0 0 1 4.9.8c0 1.6-2.5 2.2-2.5 3.7"/><circle cx="12" cy="17.2" r="1" fill="currentColor" stroke="none"/></svg>',
   };
+  const APP_VERSION = 4;  // shown once: what is new in this version
   const RADAR_MARK = '<svg class="radar-mark" viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="14" style="fill:var(--accent-soft)"/><circle cx="16" cy="16" r="14" fill="none" style="stroke:var(--accent)" stroke-width="1.5"/><circle cx="16" cy="16" r="8.5" fill="none" style="stroke:var(--accent)" stroke-width="1" opacity=".55"/><path d="M16 16L16 2A14 14 0 0 1 28.1 9z" style="fill:var(--accent)" opacity=".35"/><path d="M16 16L28.1 9" style="stroke:var(--accent)" stroke-width="1.6" stroke-linecap="round"/><circle cx="21.5" cy="11.5" r="2" style="fill:var(--good)"/></svg>';
 
   // ------------------------------------------------------------------ state
@@ -316,7 +318,204 @@
       <div class="prob-sub">${levels}ממוצע ${pct(r.prob_base)}${ratio >= 1.15 ? ` · פי ${ratio.toFixed(1)}` : ratio <= 0.85 ? ' · נמוך מהממוצע' : ' · בערך כמו הממוצע'}</div></div>`;
   }
 
-  function pickCard(r, i) {
+  // ------------------------------------------------------------------ can the list be trusted? (shown first)
+  // proven   = the model passed its out-of-sample test AND the paper portfolio beats the S&P 500 after 20+ closed trades
+  // tested   = the model passed, but the paper record is still short
+  // unproven = no tested edge yet: the list is for checking and paper trading only
+  const MIN_CLOSED = 20;
+  const N = (x) => `<span class="num">${esc(x)}</span>`;   // isolated number / Latin name inside Hebrew text
+  const SPX = N('S&P 500');
+  function trustState(d) {
+    const m = (d && d.model) || null;
+    const p = (d && d.paper) || {};
+    if (!m || !m.passed) return 'unproven';
+    const beats = isNum(p.return_on_invested) && isNum(p.spy_ret) && p.return_on_invested > p.spy_ret;
+    return (p.closed || 0) >= MIN_CLOSED && beats ? 'proven' : 'tested';
+  }
+  function modelSpy(m) {
+    if (m && isNum(m.spy_ret)) return m.spy_ret;
+    const v = state.model && state.model.validation;
+    return v && v.money && v.money.model && isNum(v.money.model.spy) ? v.money.model.spy : null;
+  }
+  // these return HTML: fixed Hebrew text plus isolated numbers
+  function modelLine(m) {
+    if (!m) return 'מודל הסיכוי עוד לא אומן ונבדק, ולכן אין הוכחה שהבחירות טובות מהממוצע.';
+    if (!isNum(m.top_ret) || !isNum(m.all_ret)) {
+      return m.passed ? 'מודל הסיכוי עבר את הבדיקה על שנים שלא ראה.' : 'מודל הסיכוי לא עבר את הבדיקה על שנים שלא ראה.';
+    }
+    const spy = modelSpy(m);
+    return `בבדיקה על שנים שהמודל לא ראה: המובילות שלו ${N(pct(m.top_ret, 1, true))} לעסקה בממוצע, כל המניות ${N(pct(m.all_ret, 1, true))}${isNum(spy) ? `, ${SPX} ${N(pct(spy, 1, true))}` : ''}.`;
+  }
+  function paperLine(p) {
+    if (!p || !p.n) return 'תיק הנייר עוד ריק. הוא מתחיל לעקוב אחרי הבחירות מהסריקה הבאה.';
+    return `תיק הנייר: ${N(pct(p.return_on_invested, 1, true))} מאז ${N(dm(p.since))}${isNum(p.spy_ret) ? `, ${SPX} באותה תקופה ${N(pct(p.spy_ret, 1, true))}` : ''}. נסגרו ${N(p.closed || 0)} מתוך ${N(MIN_CLOSED)} העסקאות שצריך כדי לשפוט.`;
+  }
+  // gaps in today's data that change how far the list can be trusted
+  function dataIssues(d) {
+    const out = [];
+    const res = d.results || [];
+    const h = d.health;
+    const n = h ? h.n : res.length;
+    const news = h ? h.news : res.filter((r) => (r.news || []).length).length;
+    if (n >= 10 && news === 0) out.push('לא התקבלו חדשות לאף מניה בסריקה הזו, ולכן אותות החדשות לא פעלו. לבדוק חדשות ידנית.');
+    if (res.length && !res.some((r) => 'filings_checked' in r)) out.push('הסריקה הזו מלפני העדכון: בדיקת עסקאות הרכישה תרוץ מהסריקה הבאה.');
+    else if (h && n >= 10 && h.filings === 0) out.push('דיווחי SEC לא התקבלו בסריקה הזו, ולכן בדיקת עסקאות הרכישה וההנפקות לא רצה.');
+    return out;
+  }
+  function trustCard(d) {
+    if (state.demo) return '';
+    const st = trustState(d);
+    const m = d.model || null;
+    if (m && !isNum(m.spy_ret) && state.model === undefined) loadModel();
+    const head = st === 'proven' ? 'יש יתרון בבדיקה ההיסטורית וגם בתיק הנייר'
+      : st === 'tested' ? 'המודל עבר בדיקה, תיק הנייר עוד קצר'
+        : 'המערכת עוד לא הוכיחה יתרון על המדד';
+    const bottom = st === 'proven' ? 'גם יתרון מוכח לא מבטיח את העסקה הבאה: כל כניסה עם סטופ וכמות לפי החישוב.'
+      : st === 'tested' ? `עדיף להמשיך בתיק הנייר עד ${MIN_CLOSED} עסקאות סגורות לפני שסומכים על הרשימה.`
+        : 'לכן: רשימה לבדיקה ולתיק נייר, לא לקנייה בכסף אמיתי.';
+    const issues = dataIssues(d);
+    return `<section class="card trust ${st === 'proven' ? 'good' : 'warn'}" aria-label="האם לסמוך על הרשימה">
+      <div class="trust-head"><span class="dot"></span><h3>${esc(head)}</h3></div>
+      <ul class="trust-list"><li>${modelLine(m)}</li><li>${paperLine(d.paper)}</li>${issues.map((x) => `<li class="issue">${esc(x)}</li>`).join('')}</ul>
+      <p class="trust-bottom">${esc(bottom)}</p>
+      <div class="trust-actions"><button class="btn small" data-act="guide">איך קוראים את המסך</button><button class="btn small ghost" data-tab="perf">הבדיקה המלאה</button></div>
+    </section>`;
+  }
+  function whatsNew() {
+    if (state.demo || PREVIEW || !state.data || store.get('seen', 0) >= APP_VERSION) return '';
+    return banner('info', 'חדש בגרסה הזו', 'מניות בתהליך רכישה מסוננות לבד, בכל מניה יש "בדיקה לפני כניסה", ואת גודל התיק מגדירים בהגדרות.',
+      '<div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap"><button class="btn small" data-act="guide">איך קוראים את המסך</button><button class="btn small ghost" data-act="seen">הבנתי</button></div>');
+  }
+
+  // ------------------------------------------------------------------ pre-entry checklist
+  // Built only from what the scan already knows. Each item: good / bad / unk (not known). Reading the news stays manual.
+  function daysUntil(iso, fromIso) {
+    if (!iso) return null;
+    const from = String(fromIso || new Date().toISOString()).slice(0, 10);
+    const a = new Date(from + 'T12:00:00Z').getTime(), b = new Date(String(iso).slice(0, 10) + 'T12:00:00Z').getTime();
+    return isFinite(a) && isFinite(b) ? Math.round((b - a) / 864e5) : null;
+  }
+  const hasCon = (r, re) => (r.cons || []).some((c) => re.test(c));
+  const sigScore = (r, key) => { const x = (r.signals || []).find((s) => s.key === key); return x ? x.score : null; };
+  const FLAG_TEXT = {
+    offering: 'דיווח הנפקה ל־SEC בשבועות האחרונים: ייתכן דילול ולחץ מכירות',
+    late: 'החברה הודיעה על איחור בדוח הכספי',
+    bankruptcy: 'דיווח על פשיטת רגל או כינוס נכסים',
+    restatement: 'החברה הודיעה שאין להסתמך על דוחות כספיים קודמים',
+    listing: 'הודעה על אי עמידה בכללי הבורסה',
+  };
+  const DEAL_CHECK = {
+    target: 'בתהליך רכישה: הרווח מוגבל למחיר העסקה', completed: 'עסקת רכישה בשלבי סגירה',
+    suspect: 'חשד להצעת רכישה: לבדוק בחדשות', involved: 'מעורבת בעסקת מיזוג: לבדוק את התנאים',
+    terminated: 'ייתכן שעסקת מיזוג בוטלה: לבדוק',
+  };
+  function checklist(r, scanDate) {
+    const items = [];
+    const add = (st, html) => items.push({ st, html });   // html: Hebrew text, numbers wrapped with N()
+    // 1. takeover
+    if (r.deal) add('bad', esc(DEAL_CHECK[r.deal.status] || r.deal.short || 'עסקת מיזוג'));
+    else if (r.exclude) add('bad', esc(r.exclude));
+    else if (r.filings_checked) add('good', 'אין סימן לעסקת רכישה בדיווחי SEC, בכותרות או בתנועת המחיר');
+    else if ('filings_checked' in r) add('unk', 'דיווחי SEC לא זמינים למניה הזו: לבדוק בחדשות שאין הצעת רכישה');
+    else add('unk', 'עסקת רכישה: לא נבדק בסריקה הזו (נבדק מהסריקה הבאה)');
+    // 2. quarterly report
+    const dd = daysUntil(r.earnings_date, scanDate);
+    if (dd == null || dd < 0) add('unk', 'תאריך הדוח הרבעוני הבא לא ידוע');
+    else if (dd <= 10) add('bad', dd === 0 ? 'דוח רבעוני היום: המחיר יכול לקפוץ או לצנוח' : `דוח רבעוני בעוד ${N(dd)} ימים: ביום הדוח המחיר יכול לקפוץ או לצנוח`);
+    else add('good', `הדוח הרבעוני הבא רחוק (${N(dmy(r.earnings_date))})`);
+    // 3. analysts' price target
+    if (isNum(r.target_mean) && isNum(r.price) && r.price > 0) {
+      const gap = r.target_mean / r.price - 1;
+      if (isNum(r.n_analysts) && r.n_analysts < 3) add('unk', 'מעט מאוד אנליסטים מכסים את המניה');
+      else if (gap < 0) add('bad', `מחיר היעד הממוצע של האנליסטים, ${N(price(r.target_mean))}, נמוך מהמחיר ב־${N(pct(-gap))}`);
+      else add('good', `מחיר היעד הממוצע של האנליסטים, ${N(price(r.target_mean))}, גבוה מהמחיר ב־${N(pct(gap))}`);
+    } else {
+      const sc = sigScore(r, 'price_target');
+      if (sc == null) add('unk', 'אין נתוני מחיר יעד של אנליסטים');
+      else if (sc < -0.05 || hasCon(r, /מחיר היעד הממוצע[^(]*\(\u200e?-\d/)) add('bad', 'מחיר היעד הממוצע של האנליסטים נמוך מהמחיר');
+      else add('good', 'מחיר היעד של האנליסטים לא נמוך מהמחיר');
+    }
+    // 4. stretched after a fast rise
+    const hot = isNum(r.rsi) && r.rsi > 75, far = isNum(r.ext50) && r.ext50 > 0.3;
+    if (hot || far) add('bad', [hot ? `קנויה־יתר (${N('RSI ' + Math.round(r.rsi))})` : '', far ? `${N(pct(r.ext50))} מעל הממוצע של 50 ימים` : ''].filter(Boolean).join(', ') + ': לרוב עדיף לחכות לתיקון');
+    else if (!isNum(r.rsi) && !isNum(r.ext50) && hasCon(r, /קנויה־יתר|מתוחה/)) add('bad', 'המחיר מתוח אחרי עלייה מהירה: לרוב עדיף לחכות לתיקון');
+    else add('good', 'המחיר לא מתוח מדי בטווח הקצר');
+    // 5. company events from SEC filings (offering, late report, bankruptcy...)
+    const flags = (r.flags || []).filter((f) => FLAG_TEXT[f]);
+    if (flags.length) flags.forEach((f) => add('bad', FLAG_TEXT[f]));
+    else if (hasCon(r, /הנפקת מניות|מצוקה פיננסית/)) add('bad', 'בחדשות: הנפקת מניות או מצוקה פיננסית');
+    else if (r.filings_checked) add('good', 'אין בדיווחי SEC הנפקה, איחור בדוחות או פשיטת רגל');
+    else add('unk', 'הנפקות ואירועי חברה: לא נבדק');
+    // 6. overall risk score
+    if (isNum(r.risk) && r.risk >= 60) add('bad', `ציון סיכון גבוה (${N(Math.round(r.risk))})`);
+    else if (isNum(r.risk)) add('good', `ציון הסיכון סביר (${N(Math.round(r.risk))})`);
+    return items;
+  }
+  const nBad = (n) => (n === 1 ? 'בעיה אחת' : `${n} בעיות`);
+  function checkChip(r, scanDate) {
+    const bad = checklist(r, scanDate).filter((x) => x.st === 'bad').length;
+    return bad ? `<span class="chip bad">בדיקה לפני כניסה: ${nBad(bad)}</span>` : '<span class="chip good">בדיקה לפני כניסה: תקין</span>';
+  }
+  function checklistCard(r, ctx) {
+    const items = checklist(r, ctx.date);
+    const bad = items.filter((x) => x.st === 'bad').length;
+    const unproven = !ctx.demo && trustState(state.data) === 'unproven';
+    let verdict, tone;
+    if (r.exclude) {
+      verdict = `לא לקנייה: ${r.deal ? r.deal.short : r.exclude}.`; tone = 'bad';
+    } else if (unproven) {
+      verdict = `לא לכסף אמיתי כרגע: המערכת עוד לא הוכיחה יתרון על המדד. אפשר לעקוב אחרי המניה בתיק הנייר.${bad ? ` ובמניה עצמה: ${nBad(bad)}.` : ''}`; tone = 'warn';
+    } else if (bad) {
+      verdict = `יש ${nBad(bad)} שצריך לבדוק לפני כל החלטה.`; tone = 'warn';
+    } else {
+      verdict = 'עברה את הבדיקה האוטומטית. נשאר לקרוא את החדשות האחרונות, ולהיכנס רק עם סטופ כפקודה אצל הברוקר.'; tone = 'good';
+    }
+    const mark = { good: ['✓', 'תקין'], bad: ['✗', 'בעיה'], unk: ['?', 'לא ידוע'] };
+    const li = (st, html) => `<li class="${st}"><i aria-hidden="true">${mark[st][0]}</i><span><span class="sr-only">${mark[st][1]}: </span>${html}</span></li>`;
+    const newsBtn = !ctx.demo && /^[A-Z][A-Z0-9.\-]*$/.test(r.ticker)
+      ? `<a class="btn small ghost" href="https://finance.yahoo.com/quote/${encodeURIComponent(r.ticker)}/news" target="_blank" rel="noopener">חדשות אחרונות על ${esc(r.ticker)}</a>` : '';
+    return `<div class="card" id="check"><h3>בדיקה לפני כניסה</h3>
+      <ul class="checks">${unproven && !r.exclude ? li('bad', 'המערכת עוד לא הוכיחה יתרון על המדד (הכרטיס העליון במסך הראשי)') : ''}${items.map((x) => li(x.st, x.html)).join('')}${li('unk', 'בדיקה ידנית: מה קרה בחדשות בשבוע האחרון')}</ul>
+      <div class="verdict ${tone}">${esc(verdict)}</div>
+      ${newsBtn ? `<div class="links" style="margin-top:10px">${newsBtn}</div>` : ''}</div>`;
+  }
+
+  // ------------------------------------------------------------------ position size by the user's own account (saved on this phone)
+  const SIZING_DEFAULT = { account: 50000, risk: 1, maxPos: 10 };
+  function mySizing() {
+    const z = store.get('sizing') || {};
+    const ok = (v, lo, hi) => isNum(v) && v >= lo && v <= hi;
+    return {
+      account: ok(z.account, 100, 1e9) ? z.account : SIZING_DEFAULT.account,
+      risk: ok(z.risk, 0.1, 10) ? z.risk : SIZING_DEFAULT.risk,
+      maxPos: ok(z.maxPos, 1, 100) ? z.maxPos : SIZING_DEFAULT.maxPos,
+      custom: !!store.get('sizing'),
+    };
+  }
+  // same rule as the cloud: a stop hit costs `risk`% of the account, and no position is bigger than `maxPos`%
+  function sizePlan(r) {
+    const plan = r.plan || {};
+    if (!isNum(r.price) || !isNum(plan.stop) || plan.stop >= r.price) return plan;
+    const z = mySizing();
+    const perShare = r.price - plan.stop;
+    let shares = Math.floor((z.account * z.risk / 100) / perShare);
+    const maxValue = z.account * z.maxPos / 100;
+    if (shares * r.price > maxValue) shares = Math.floor(maxValue / r.price);
+    shares = Math.max(0, shares);
+    return { ...plan, shares, value: shares * r.price, risk_amount: shares * perShare, pct_of_account: (shares * r.price) / z.account };
+  }
+  function saveSizing() {
+    const read = (id) => parseFloat(String((document.getElementById(id) || {}).value || '').replace(/[,\s$₪%]/g, ''));
+    const z = { account: read('acct'), risk: read('riskp'), maxPos: read('maxp') };
+    const msg = document.getElementById('sizing-msg');
+    if (!(z.account >= 100 && z.account <= 1e9)) { msg.textContent = 'גודל התיק צריך להיות בין 100 ל־1,000,000,000 דולר.'; return; }
+    if (!(z.risk >= 0.1 && z.risk <= 10)) { msg.textContent = 'הסיכון לעסקה צריך להיות בין 0.1% ל־10%. מקובל: 0.5% עד 1%.'; return; }
+    if (!(z.maxPos >= 1 && z.maxPos <= 100)) { msg.textContent = 'הפוזיציה המקסימלית צריכה להיות בין 1% ל־100%.'; return; }
+    store.set('sizing', z);
+    msg.textContent = 'נשמר. הכמויות במסכי המניות מחושבות עכשיו לפי התיק שלך.';
+  }
+
+  function pickCard(r, i, scanDate) {
     const chg = changeOver(r.closes, 63);
     const [rc, rl] = riskLevel(r.risk);
     const warn = (r.cons || [])[0];
@@ -335,6 +534,7 @@
         <span class="chip">מחיר <b class="num">${price(r.price)}</b></span>
         ${r.plan && r.plan.stop ? `<span class="chip">סטופ <b class="num">${price(r.plan.stop)}</b></span>` : ''}
         ${r.plan && r.plan.target ? `<span class="chip">יעד <b class="num">${price(r.plan.target)}</b></span>` : ''}</div>
+      <div class="chips">${checkChip(r, scanDate)}${r.deal ? `<span class="chip warn">${esc(r.deal.short)}</span>` : ''}</div>
     </article>`;
   }
 
@@ -349,18 +549,26 @@
     }
     const res = d.results || [];
     const picks = res.map((r, i) => [r, i]).filter(([r]) => r.pick);
-    const watch = res.map((r, i) => [r, i]).filter(([r]) => !r.pick).slice(0, 12);
+    const watch = res.map((r, i) => [r, i]).filter(([r]) => !r.pick && !r.exclude).slice(0, 12);
+    const excluded = res.map((r, i) => [r, i]).filter(([r]) => r.exclude).slice(0, 8);
+    const trusted = trustState(d) !== 'unproven' || state.demo;
     const m = d.market || {};
     const mk = m.score > 0.25 ? 'good' : m.score < -0.25 ? 'bad' : '';
     const hot = (d.themes || []).filter((t) => t.ratio >= 1.25).slice(0, 3);
     return `<div class="stack">
       ${statusBanners()}
+      ${whatsNew()}
+      ${trustCard(d)}
       <div class="strip">
         <button class="pill ${mk}" data-tab="market"><span class="sw"></span>שוק ${esc(m.label || '')}</button>
         ${hot.map((t) => `<button class="pill warn" data-tab="market"><span class="sw"></span>${esc(t.he)} · פי ${t.ratio.toFixed(1)}</button>`).join('')}
       </div>
-      <div class="section-title"><h2>המניות שנבחרו</h2><span class="muted small">${picks.length} מתוך ${d.counts ? d.counts.deep : res.length} שנבדקו לעומק</span></div>
-      ${picks.length ? picks.map(([r, i]) => pickCard(r, i)).join('') : '<div class="card empty">אף מניה לא עברה היום את סף הפוטנציאל והסיכון. זה תקין – לפעמים הדבר הנכון הוא לחכות.</div>'}
+      <div class="section-title"><h2>${trusted ? 'המניות שנבחרו' : 'מועמדות לבדיקה'}</h2><span class="muted small">${picks.length} מתוך ${d.counts ? d.counts.deep : res.length} שנבדקו לעומק</span></div>
+      ${picks.length ? picks.map(([r, i]) => pickCard(r, i, d.date)).join('') : '<div class="card empty">אף מניה לא עברה היום את סף הפוטנציאל והסיכון. זה תקין – לפעמים הדבר הנכון הוא לחכות.</div>'}
+      ${excluded.length ? `<div class="section-title"><h2>סוננו היום</h2><span class="muted small">היו עוברות את הסף, אבל לא מתאימות</span></div>
+      <div class="card rows">${excluded.map(([r, i]) => `<button class="row" data-open="${i}"><span class="score-chip">${Math.round(r.upside)}</span>
+        <span class="grow"><span class="tk">${esc(r.ticker)}</span><span class="nm">${esc(r.name)}</span></span>
+        <span class="chip bad">${esc(r.exclude)}</span></button>`).join('')}</div>` : ''}
       ${watch.length ? `<div class="section-title"><h2>קרובות לסף</h2><span class="muted small">לפי ציון הפוטנציאל</span></div>
       <div class="card rows">${watch.map(([r, i]) => `<button class="row" data-open="${i}"><span class="score-chip">${Math.round(r.upside)}</span>
         <span class="grow"><span class="tk">${esc(r.ticker)}</span><span class="nm">${esc(r.name)}</span></span>
@@ -512,7 +720,7 @@
   async function loadModel() {
     const md = await getJSON(state.demo ? 'demo/model.json' : 'model.json');
     state.model = md || null;
-    if (state.tab === 'perf') render();
+    if (state.tab === 'perf' || state.tab === 'today') render();
   }
 
   function viewBacktest() {
@@ -613,6 +821,8 @@
     return out;
   }
 
+  // the deal text starts with its own label ("בתהליך רכישה: ..."), which the banner title already shows
+  const dealBody = (deal) => String(deal.text || '').replace(new RegExp('^' + String(deal.short || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*:\\s*'), '');
   function viewDetail() {
     const { r, ctx, period } = state.sheet;
     const dates = ctx.spark_dates || [];
@@ -621,12 +831,13 @@
     const v = closes.slice(-n), dts = dates.slice(-n);
     const chg = changeOver(closes, n - 1);
     const [rc, rl] = riskLevel(r.risk);
-    const plan = r.plan || {};
+    const plan = sizePlan(r);
+    const z = mySizing();
     const facts = [
       ['מחיר אחרון', price(r.price)],
       plan.stop ? ['סטופ מוצע', `${price(plan.stop)} (${pct(plan.stop_pct)})`] : null,
       plan.target ? ['יעד מוצע', `${price(plan.target)} (${pct(plan.target_pct, 0, true)})`] : null,
-      plan.shares ? ['כמות מוצעת', `${plan.shares} מניות`] : null,
+      isNum(plan.shares) && plan.stop ? ['כמות מוצעת', plan.shares ? `${plan.shares} מניות` : 'אפילו מניה אחת חורגת מהסיכון'] : null,
       plan.value ? ['שווי הפוזיציה', money(plan.value)] : null,
       plan.risk_amount ? ['הפסד מקסימלי בסטופ', money(plan.risk_amount)] : null,
       isNum(r.move_3m) ? ['תנודה טיפוסית ל־3 חודשים', `±${pct(r.move_3m)}`] : null,
@@ -644,11 +855,13 @@
       </div></div>
       <div class="sheet-in">
         ${ctx.demo ? banner('info', 'מניה בדויה (דמו)', 'כל הנתונים כאן לדוגמה בלבד.') : ''}
+        ${r.deal ? banner(r.exclude ? 'bad' : 'warn', r.exclude ? `${r.deal.short}: לא נבחרת` : r.deal.short, dealBody(r.deal)) : r.exclude ? banner('bad', `${r.exclude}: לא נבחרת`, '') : ''}
         <div class="d-head"><div class="grow"><div class="nm">${esc(r.name)}</div>
           <div class="muted small">${esc([r.sector, r.industry, r.country].filter(Boolean).join(' · '))}</div>
           <div class="price-line"><span class="px">${price(r.price)}</span><span class="chg ${chg >= 0 ? 'up' : 'down'}">${pct(chg, 1, true)}</span></div></div></div>
         <div class="card"><div class="rings">${ring(r.upside, 'var(--accent)', 'פוטנציאל עלייה', true)}${ring(r.risk, riskColor(r.risk), `סיכון ${rl}`, true)}
-          <div class="small muted" style="align-self:center;flex:1;min-width:0">פוטנציאל: כמה אותות מצביעים לעלייה, בשקלול הביטחון בכל אחד. סיכון: תנודתיות, אירועים קרובים ומצב השוק.</div></div></div>
+          <div class="small muted" style="align-self:center;flex:1;min-width:0">פוטנציאל: כמה אותות מצביעים לעלייה (50 = ניטרלי, לא אחוז סיכוי). סיכון: תנודתיות, אירועים קרובים ומצב השוק.</div></div></div>
+        ${checklistCard(r, ctx)}
         ${isNum(r.prob) && r.prob_base ? `<div class="card"><h3>מודל הסיכוי</h3>${probLine(r)}${probExplain(r)}</div>` : ''}
         <div class="card"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px"><h3>מחיר</h3>
           <div class="seg" role="group" aria-label="תקופה">${[[21, 'חודש'], [63, '3 חודשים'], [130, '6 חודשים']].map(([p, l]) => `<button data-period="${p}" aria-pressed="${p === period}">${l}</button>`).join('')}</div></div>
@@ -658,13 +871,69 @@
         ${(r.pros || []).length ? `<div class="card"><h3>למה נבחרה</h3><ul class="list pros">${r.pros.map((p) => `<li>${esc(p)}</li>`).join('')}</ul></div>` : ''}
         ${(r.cons || []).length ? `<div class="card"><h3>שים לב</h3><ul class="list cons">${r.cons.map((p) => `<li>${esc(p)}</li>`).join('')}</ul></div>` : ''}
         <div class="card"><h3>תוכנית מוצעת</h3><p class="muted small" style="margin:2px 0 10px">הסטופ נקבע לפי התנודה הרגילה של המניה, והיעד פי 3 מהמרחק לסטופ. הכמות נקבעת כך שפגיעה בסטופ תעלה אחוז קבוע מהתיק. אם לא הגיעה לאף אחד מהם תוך 3 חודשים – יוצאים.</p>
-          <div class="facts">${facts.map(([k, val]) => `<div class="fact"><div class="k">${esc(k)}</div><div class="v">${esc(val)}</div></div>`).join('')}</div></div>
+          <div class="facts">${facts.map(([k, val]) => `<div class="fact"><div class="k">${esc(k)}</div><div class="v">${esc(val)}</div></div>`).join('')}</div>
+          ${plan.stop ? `<p class="muted small" style="margin:10px 0 0">הכמות מחושבת לפי תיק של ${N(money(z.account))} וסיכון של ${N(z.risk + '%')} לעסקה${z.custom ? '' : ' (ברירת מחדל)'}. <button class="linkish" data-act="settings-sizing">שינוי</button></p>` : ''}</div>
         <div class="card"><h3>כל האותות</h3><p class="muted small" style="margin:2px 0 8px">כל אות מקבל ציון בין שלילי לחיובי. אותות בלי נתונים לא מוצגים.</p>
           ${divHead('שלילי', 'חיובי')}${(r.signals || []).map((s) => divRow(s.label, s.score, (s.score >= 0 ? '+' : '') + s.score.toFixed(2))).join('')}</div>
         ${(r.news || []).length ? `<div class="card news"><h3>כותרות אחרונות</h3><p class="muted small" style="margin:2px 0 6px">הכותרות המקוריות, באנגלית</p>
           ${r.news.map((x) => x.url ? `<a href="${esc(x.url)}" target="_blank" rel="noopener"><span class="lbl">${esc(x.label || '')}</span>${esc(x.title)}</a>` : `<a><span class="lbl">${esc(x.label || '')}</span>${esc(x.title)}</a>`).join('')}</div>` : ''}
         ${links}
         <p class="muted small">נותח ב־${dmy(ctx.date)} · כיסוי נתונים ${pct(r.coverage)} · כלי עזר למחקר, לא ייעוץ השקעות.</p>
+      </div>`;
+  }
+
+  // ------------------------------------------------------------------ guide: how to read the app and what to do with it
+  function openGuide() {
+    store.set('seen', APP_VERSION);
+    if (state.sheet) { state.sheet = { kind: 'guide' }; renderSheet(); pushSheet(true); } else { state.sheet = { kind: 'guide' }; renderSheet(); pushSheet(); }
+    render();
+  }
+  function viewGuide() {
+    const li = (b, t) => `<li><b>${esc(b)}</b> ${esc(t)}</li>`;
+    return `<div class="sheet-bar"><div class="topbar-in"><button class="icon-btn" data-act="close" aria-label="חזרה">${ICON.back}</button>
+        <div class="brand"><h1>איך קוראים את הרדאר</h1></div></div></div>
+      <div class="sheet-in guide">
+        <div class="card"><h3>בקצרה</h3><ul class="list">
+          <li>כל בוקר המערכת עוברת על כ־6,000 מניות אמריקאיות ומשאירה עד 10. היא מסננת, היא לא יודעת לחזות.</li>
+          <li>הכרטיס העליון במסך הראשי אומר אם המערכת כבר הוכיחה שהיא מנצחת את S&amp;P 500. כל עוד לא, הרשימה היא לבדיקה ולמעקב בתיק הנייר, לא לקנייה.</li>
+          <li>כל עסקה, גם על נייר: סטופ מראש, כמות לפי החישוב, ויציאה ביעד, בסטופ או אחרי 3 חודשים.</li></ul></div>
+        <div class="card"><h3>הכרטיס של מניה</h3><ul class="list">
+          ${li('פוטנציאל (העיגול, 0 עד 100):', 'כמה מהאותות מצביעים לעלייה, בשקלול הביטחון בכל אחד. 50 = ניטרלי. מ־60 ומעלה מניה נכנסת לרשימה. זה לא אחוז סיכוי.')}
+          ${li('הגרף והאחוז לידו:', 'המחיר ב־3 החודשים האחרונים. קפיצה חדה בסוף הגרף שאחריה קו שטוח היא סימן מוכר להצעת רכישה.')}
+          ${li('נקודות ירוקות:', 'הסיבות העיקריות שהמניה עלתה בסינון.')}
+          ${li('שים לב:', 'האזהרה החשובה ביותר נגד המניה.')}
+          ${li('סיכון (0 עד 100):', 'תנודתיות, אירועים קרובים כמו דוח רבעוני, מחיר מתוח ומצב השוק. עד 35 נמוך, מ־60 גבוה.')}
+          ${li('מחיר:', 'מחיר הסגירה האחרון בסריקה.')}
+          ${li('סטופ:', 'המחיר שבו יוצאים בהפסד. הוא נקבע לפי התנודה הרגילה של המניה: 2.5 תנודות יומיות ממוצעות מתחת למחיר.')}
+          ${li('יעד:', 'פי 3 מהמרחק לסטופ. סטופ 10% מתחת למחיר = יעד 30% מעליו.')}
+          ${li('בדיקה לפני כניסה:', 'רשימה אוטומטית של סיבות לוותר: עסקת רכישה, דוח קרוב, מחיר יעד של אנליסטים מתחת למחיר, מחיר מתוח, הנפקה. הפירוט במסך המניה.')}
+          ${li('סיכוי באחוזים:', 'מופיע רק כשמודל הסיכוי עבר את הבדיקה על שנים שלא ראה.')}</ul></div>
+        <div class="card"><h3>הפס שמעל הרשימה</h3><ul class="list">
+          ${li('שוק ניטרלי, חיובי או שלילי:', 'מצב הכלכלה והשוק: ריבית, אינפלציה, אבטלה ומדד הפחד VIX. במצב שלילי המערכת בוחרת פחות מניות ומחמירה בסף.')}
+          ${li('נושא · פי X:', 'כמה מדברים בעולם על הנושא בשבוע האחרון לעומת החודשיים שלפניו. "מתקפות סייבר · פי 1.5" = פי 1.5 מהרגיל, וזה מעלה מעט את הציון של ענפים שנהנים מזה. לחיצה פותחת את לשונית השוק.')}</ul></div>
+        <div class="card"><h3>מה עושים עם זה</h3><ol class="steps">
+          <li>מסתכלים על הכרטיס העליון. אם המערכת עוד לא הוכיחה יתרון, עוקבים רק בתיק הנייר.</li>
+          <li>פותחים מניה ועוברים על "בדיקה לפני כניסה". עסקת רכישה, דוח בעוד פחות מ־10 ימים או הנפקה: מוותרים.</li>
+          <li>קוראים את החדשות של השבוע האחרון (כפתור במסך המניה).</li>
+          <li>אם נכנסים: הכמות לפי החישוב במסך המניה (את גודל התיק מגדירים בהגדרות), והסטופ נכנס כפקודה אמיתית אצל הברוקר באותו יום. את הסטופ לא מורידים.</li>
+          <li>יוצאים ביעד, בסטופ או אחרי 3 חודשים, מה שקורה קודם.</li>
+          <li>פעם בשבוע: לשונית ביצועים. השאלה היחידה שחשובה שם היא אם תיק הנייר מנצח את S&amp;P 500.</li></ol></div>
+        <div class="card"><h3>מונחים</h3><ul class="list">
+          ${li('S&P 500:', 'מדד של 500 החברות הגדולות בארה"ב. אפשר לקנות אותו בקרן סל אחת. אם המערכת לא מנצחת אותו לאורך זמן, אין סיבה לבחור מניות לבד.')}
+          ${li('תיק נייר:', 'עסקאות מדומות בלי כסף אמיתי, כדי לבדוק אם השיטה עובדת לפני שמסכנים כסף.')}
+          ${li('עסקת רכישה:', 'חברה אחרת מסכימה לקנות את כל המניות במחיר קבוע. המניה קופצת לאזור המחיר הזה ונתקעת שם, ולכן כמעט אין בה מה להרוויח. אם העסקה מתבטלת, היא נופלת.')}
+          ${li('דוח רבעוני:', 'פעם ברבעון החברה מפרסמת תוצאות. ביום הזה המניה יכולה לזוז 10% עד 20% לכל כיוון.')}
+          ${li('הנפקה (דילול):', 'החברה מוכרת מניות חדשות כדי לגייס כסף. יש יותר מניות, ולרוב המחיר יורד.')}
+          ${li('מחיר יעד של אנליסטים:', 'ההערכה הממוצעת של בתי ההשקעות למחיר המניה בעוד שנה. הם טועים הרבה, אבל יעד מתחת למחיר הנוכחי הוא סימן אזהרה.')}
+          ${li('RSI:', 'מדד מ־0 עד 100 לקצב העלייה בשבועיים האחרונים. מעל 75 = עלתה מהר מדי, ולרוב בא תיקון.')}
+          ${li('ממוצע 50 ימים:', 'המחיר הממוצע בכ־10 השבועות האחרונים. מניה שנסחרת הרבה מעליו מתוחה.')}
+          ${li('מחזור מסחר:', 'כמה מניות נסחרו. עלייה במחיר עם מחזור גבוה = כסף גדול נכנס.')}
+          ${li('שורט סקוויז:', 'שורט = הימור על ירידה. כשהמחיר עולה, מי שהימר על ירידה נאלץ לקנות, וזה מקפיץ את המחיר עוד. זה עובד גם הפוך, ולכן תנודתי.')}</ul></div>
+        <div class="card"><h3>מה המערכת לא יודעת</h3><ul class="list">
+          <li>אף מערכת לא יודעת לחזות זינוק בוודאות. מניה עם פוטנציאל לעלייה חדה יכולה גם לרדת חדה.</li>
+          <li>מחירים, אנליסטים וחדשות מגיעים מ־Yahoo Finance דרך ספרייה לא רשמית, ולפעמים חסרים. כשחסר משהו חשוב, זה כתוב בכרטיס העליון.</li>
+          <li>כשלא מתקבלות כותרות, אותות החדשות לא פועלים. מקור חדשות נוסף וחינמי: הרשמה ב־<span class="kbd">finnhub.io</span>, ואת המפתח מוסיפים ב־GitHub כ־Secret בשם <span class="kbd">FINNHUB_API_KEY</span>.</li>
+          <li>כלי עזר לסינון ולמחקר, לא ייעוץ השקעות.</li></ul></div>
       </div>`;
   }
 
@@ -692,6 +961,14 @@
           ${conn ? `<div class="banner ${conn.ok ? 'good' : 'bad'}"><span class="dot"></span><div class="grow">${esc(conn.text)}</div></div>` : ''}
           <p class="muted small" style="margin:0">המפתח נשמר רק בטלפון הזה.</p>`}
         </div>
+        <div class="card stack" style="gap:10px" id="sizing"><h3>התיק שלי</h3>
+          <p class="muted small" style="margin:0">לפי זה מחושבת הכמות בכל מניה: אם הסטופ נפגע, ההפסד הוא האחוז שבחרת מהתיק. נשמר רק בטלפון הזה.</p>
+          <div class="field"><label for="acct">גודל התיק לחישוב (בדולרים)</label><input class="input mono" id="acct" inputmode="decimal" value="${mySizing().account}" style="text-align:left"></div>
+          <div class="field"><label for="riskp">הפסד מקסימלי לעסקה (אחוז מהתיק)</label><input class="input mono" id="riskp" inputmode="decimal" value="${mySizing().risk}" style="text-align:left"></div>
+          <div class="field"><label for="maxp">פוזיציה מקסימלית (אחוז מהתיק)</label><input class="input mono" id="maxp" inputmode="decimal" value="${mySizing().maxPos}" style="text-align:left"></div>
+          <div><button class="btn" data-act="save-sizing">שמור</button></div>
+          <div class="muted small" id="sizing-msg" aria-live="polite"></div>
+          <p class="muted small" style="margin:0">ברירת המחדל: 50,000$, 1% ו־10%. תיק הנייר וההודעה בטלגרם ממשיכים לפי הקובץ config.yaml.</p></div>
         ${cloudReady() ? `<div class="card stack" style="gap:10px"><h3>הפעלה ידנית</h3>
           <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn ghost" data-run="scan">הרץ סריקה עכשיו</button><button class="btn ghost" data-run="backtest">הרץ בדיקה לאחור</button><button class="btn ghost" data-run="train">אמן את מודל הסיכוי</button><button class="btn ghost" data-run="test-alert">שלח הודעת בדיקה</button></div>
           <p class="muted small" style="margin:0">סריקה מלאה או אימון של המודל לוקחים 15 עד 40 דקות. אפשר לסגור את האפליקציה בינתיים. המודל מתאמן לבד פעם בחודש.</p></div>` : ''}
@@ -825,6 +1102,7 @@
       <header class="topbar"><div class="topbar-in">
         <div class="brand">${RADAR_MARK}<h1>רדאר מניות</h1></div>
         <button class="day-btn" data-act="days" id="day-btn" aria-label="בחירת יום">${ICON.cal}<span id="day-lbl">–</span></button>
+        <button class="icon-btn" data-act="guide" aria-label="איך קוראים את הרדאר">${ICON.help}</button>
         <button class="icon-btn" data-act="settings" aria-label="הגדרות">${ICON.gear}</button>
       </div></header>
       <main id="main"></main>
@@ -850,7 +1128,7 @@
     const el = document.getElementById('sheet');
     if (!state.sheet) { el.hidden = true; el.innerHTML = ''; document.body.style.overflow = ''; return; }
     const top = el.scrollTop;
-    el.innerHTML = state.sheet.kind === 'detail' ? viewDetail() : viewSettings();
+    el.innerHTML = state.sheet.kind === 'detail' ? viewDetail() : state.sheet.kind === 'guide' ? viewGuide() : viewSettings();
     el.hidden = false;
     document.body.style.overflow = 'hidden';
     drawCharts(el);
@@ -918,6 +1196,10 @@
     if (act === 'close') closeSheet();
     else if (act === 'settings') { if (state.sheet) { state.sheet = { kind: 'settings' }; renderSheet(); pushSheet(true); } else openSettings(); }
     else if (act === 'days') openDays();
+    else if (act === 'guide') openGuide();
+    else if (act === 'seen') { store.set('seen', APP_VERSION); render(); }
+    else if (act === 'save-sizing') saveSizing();
+    else if (act === 'settings-sizing') { state.sheet = { kind: 'settings', anchor: 'sizing' }; renderSheet(); pushSheet(true); setTimeout(() => { const el = document.getElementById('sizing'); if (el) el.scrollIntoView({ block: 'start' }); }, 30); }
     else if (act === 'modal-bg' && e.target === t) document.getElementById('modal-root').innerHTML = '';
     else if (act === 'today-latest') loadAll();
     else if (act === 'find') { state.tab = 'search'; render(); findTicker(t.dataset.sym); }
@@ -948,6 +1230,7 @@
   window.addEventListener('hashchange', () => {
     const k = (location.hash || '').slice(1);
     if (k === 'setup' || k === 'settings') openSettings(k === 'setup' ? 'setup' : null);
+    else if (k === 'guide') openGuide();
     else if (['today', 'market', 'perf', 'search'].includes(k) && k !== state.tab) { state.tab = k; render(); }
   });
   document.addEventListener('visibilitychange', () => { if (!document.hidden && state.job) pollJob(); });
@@ -959,6 +1242,7 @@
   render();
   loadAll().then(() => {
     if (h === 'setup' || h === 'settings') openSettings(h === 'setup' ? 'setup' : null);
+    else if (h === 'guide') openGuide();
     if (state.job) pollJob();
     else maybeAutoScan();
   });

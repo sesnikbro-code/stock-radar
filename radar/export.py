@@ -78,6 +78,11 @@ def result_json(r: dict) -> dict:
         "closes": r.get("closes", []),
         "prob": r.get("prob"), "prob_base": r.get("prob_base"), "prob_hist": r.get("prob_hist"),
         "prob_rule": r.get("prob_rule"),
+        # takeover / corporate events (SEC filings) and the inputs of the app's pre-entry checklist
+        "exclude": r.get("exclude"), "deal": r.get("deal"), "flags": r.get("flags") or [],
+        "filings_checked": bool(r.get("filings_checked")),
+        "rsi": r.get("rsi"), "ext50": r.get("ext50"), "target_mean": r.get("target_mean"),
+        "n_analysts": r.get("n_analysts"),
     }
 
 
@@ -105,6 +110,7 @@ def scan_json(res: dict) -> dict:
         "paper": res.get("paper") or {"n": 0},
         "learning": learning,
         "model": res.get("model"),
+        "health": res.get("health"),
     }
 
 

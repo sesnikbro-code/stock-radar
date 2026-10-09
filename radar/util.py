@@ -78,6 +78,7 @@ class TickerData:
     beta: float | None = None
     options_history: list[float] = field(default_factory=list)
     earnings: pd.DataFrame | None = None   # past quarterly reports: date, surprise
+    filings: list[dict] | None = None      # the company's SEC filings (None = not checked)
 
 
 @dataclass

@@ -55,6 +55,9 @@ options:
   enabled: true
   max_expirations: 2
 
+deals:                     # מניות בתהליך רכישה לא נבחרות: הרווח בהן מוגבל למחיר העסקה (מדיווחי SEC, כותרות ותנועת המחיר)
+  enabled: true            # מאותם דיווחים: הנפקות, איחור בדוחות, פשיטת רגל ותיקון דוחות מוסיפים לציון הסיכון
+
 gov_contracts:             # חוזים מממשלת ארה"ב (USASpending.gov)
   enabled: true
   lookback_days: 120

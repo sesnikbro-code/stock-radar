@@ -32,6 +32,9 @@ GOOD_NEWS = ["{n} raises full-year guidance after strong demand", "{n} beats est
 BAD_NEWS = ["{n} announces $50 million public offering", "{n} cuts guidance as weak demand persists",
             "{n} misses estimates, shares slump", "{n} faces class action lawsuit"]
 NEUTRAL_NEWS = ["{n} to present at industry conference", "{n} names new board member"]
+DEAL_TICKER = "DMO109"   # demo takeover target: a cash offer announced a week before 'today'
+DEAL_AGO = 6             # trading days before the end of the demo history
+OFFER_TICKER = "DMO001"  # demo company that just filed a stock offering
 
 
 class DemoSources:
@@ -60,12 +63,21 @@ class DemoSources:
             jumps = (rng.random(T) < 1 / 300) * rng.normal(0.02, 0.15, T)
             r = beta * mkt + mu + rng.normal(0, sig, T) + jumps
             r = np.clip(r, -0.6, 0.8)
+            if t == DEAL_TICKER:  # steady rise, +28% on the offer, then pinned near the offer price
+                k = T - DEAL_AGO
+                drng = np.random.default_rng(99)  # separate generator: the rest of the demo market stays the same
+                r[k - 25:k] = np.abs(r[k - 25:k]) * 0.3 + 0.002
+                r[k] = 0.25
+                r[k + 1:] = drng.normal(0, 0.002, T - k - 1)
             c = rng.uniform(5, 120) * np.exp(np.cumsum(r))
             o = np.r_[c[0], c[:-1]] * (1 + rng.normal(0, sig / 3, T))
             hi = np.maximum(c, o) * (1 + np.abs(rng.normal(0, sig / 2, T)))
             lo = np.minimum(c, o) * (1 - np.abs(rng.normal(0, sig / 2, T)))
             base_vol = rng.uniform(2e5, 6e6)
             v = base_vol * np.exp(rng.normal(0, 0.3, T)) * (1 + 3 * np.abs(r) / sig * 0.3)
+            if t == DEAL_TICKER:
+                v[T - DEAL_AGO] *= 4
+                v[T - DEAL_AGO + 1:] *= 2.5
             close[t], high[t], low[t], opn[t], vol[t] = c, hi, lo, o, v
             self.mu[t] = mu
             sector, industry, summary = INDUSTRIES[i % len(INDUSTRIES)]
@@ -150,6 +162,11 @@ class DemoSources:
             news.append({"title": pool[int(rng.integers(0, len(pool)))].format(n=name), "summary": "",
                          "published": now - timedelta(hours=float(rng.uniform(2, 24 * 9))),
                          "source": "Demo Wire", "url": ""})
+        k = len(self.index) - DEAL_AGO
+        if ticker == DEAL_TICKER and k < self.cut:
+            news.append({"title": f"Example Holdings to acquire {name} in all-cash deal", "summary": "",
+                         "published": datetime.combine(self.index[k].date(), datetime.min.time(), tzinfo=timezone.utc)
+                         + timedelta(hours=13), "source": "Demo Wire", "url": ""})
         base_oi = rng.uniform(2e3, 8e4)
         cv = base_oi * rng.uniform(0.05, 0.4) * (1 + 2 * max(q, 0))
         pv = base_oi * rng.uniform(0.05, 0.3) * (1 + max(-q, 0))
@@ -231,6 +248,28 @@ class DemoSources:
             sur = float(np.clip(mu[p] / 0.002 * 0.15 + rng.normal(0.02, 0.08), -1, 1))
             rows.append({"date": d, "surprise": sur if rng.random() < 0.8 else np.nan})
         return pd.DataFrame(rows, columns=["date", "surprise"])
+
+    def filings(self, cik):
+        """Synthetic SEC filing list: quarterly reports for everyone, merger filings for the takeover target and a
+        prospectus for the company that is raising money."""
+        i = cik - 1000
+        if not 0 <= i < len(self.tickers):
+            return None
+        t, T = self.tickers[i], len(self.index)
+        rows = []
+        for p in range(10 + i % 63, self.cut, 63):
+            d = self.index[p].date()
+            rows += [("8-K", d, "2.02,9.01"), ("10-Q", d, "")]
+        k = T - DEAL_AGO
+        if t == DEAL_TICKER and k < self.cut:
+            d0 = self.index[k].date()
+            rows += [("8-K", d0, "1.01,7.01,9.01"), ("SC TO-C", d0, ""), ("SC14D9C", d0, "")]
+            rows += [("SC TO-T", self.index[k + j].date(), "") for j in (2, 4) if k + j < self.cut]
+        if t == OFFER_TICKER and T - 4 < self.cut:
+            rows.append(("424B5", self.index[T - 4].date(), ""))
+        rows.sort(key=lambda x: x[1], reverse=True)  # SEC lists the newest first
+        return {"form": [x[0] for x in rows], "filingDate": [x[1].isoformat() for x in rows],
+                "items": [x[2] for x in rows]}
 
     def insider_discovery(self, days, max_filings):
         best = sorted(self.tickers, key=lambda t: -self._quality(t))[:3]
