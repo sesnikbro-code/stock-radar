@@ -26,6 +26,7 @@ scan:
   max_picks: 10            # כמה מניות לבחור ביום
   min_upside_score: 60     # ציון פוטנציאל מינימלי (0-100)
   max_risk_score: 80       # ציון סיכון מקסימלי (0-100)
+  require_model_edge: true # לא לבחור מניה שבבדיקת המודל, מניות עם סיכוי דומה הפסידו בממוצע
   history_period: 2y
   workers: 4
 
@@ -93,6 +94,7 @@ risk:
   account_size: 50000      # גודל התיק בדולרים, לחישוב גודל פוזיציה
   risk_per_trade_pct: 1.0  # כמה אחוז מהתיק מוכנים להפסיד בעסקה אחת אם הסטופ נפגע
   atr_stop_multiple: 2.5   # מרחק הסטופ = 2.5 כפול התנודה היומית הממוצעת
+  target_r: 3.0            # היעד = פי 3 מהמרחק לסטופ (סטופ 8% מתחת -> יעד 24% מעל)
   max_position_pct: 10     # פוזיציה מקסימלית באחוזים מהתיק
   earnings_blackout_days: 5
 
@@ -100,7 +102,8 @@ paper:                     # מסחר על נייר: המערכת "קונה" א�
   enabled: true
   max_open_positions: 15
   max_hold_days: 90
-  trailing_stop: true
+  trailing_stop: false     # אותה תוכנית שהמודל נבדק עליה: סטופ קבוע, יעד, ועד 3 חודשים
+  take_profit: true        # סגירה ביעד
 
 learning:                  # כיול משקלות לפי מה שבאמת עבד
   enabled: true
@@ -130,6 +133,8 @@ train:                     # מודל הסיכוי: לומד מ-5 שנות הי�
   years: 5
   max_tickers: 1000        # כמה מניות מכל השוק משתתפות באימון
   step_days: 5             # דגימה אחת בשבוע
-  target: 0.30             # השאלה: עלייה של 30%...
-  horizon_days: 63         # ...תוך 3 חודשים, לפני שהסטופ נפגע
+  target_mode: r           # r = השאלה: האם תגיע ליעד (פי target_r מהסטופ) לפני הסטופ | pct = עלייה באחוז קבוע (target)
+  target: 0.30             # בשימוש רק כש-target_mode: pct
+  horizon_days: 63         # תוך 3 חודשים
+  cost_pct: 0.2            # עמלות ומרווח לעסקה, באחוזים
   retrain_days: 30         # הענן מאמן מחדש לבד פעם בחודש

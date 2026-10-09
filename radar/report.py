@@ -82,13 +82,22 @@ def he_country(c: str | None) -> str:
     return COUNTRY_HE.get(iso, c or "") if iso else (c or "")
 
 
+def prob_label(r: dict) -> str:
+    rule = r.get("prob_rule") or {}
+    if rule.get("mode") == "pct" and rule.get("pct"):
+        return f"סיכוי לעלות {rule['pct']:.0%} לפני הסטופ"
+    return "סיכוי להגיע ליעד לפני הסטופ"
+
+
 def _card(r: dict, show_titles: bool) -> str:
     plan = r.get("plan") or {}
     facts = [f"מחיר <b>{r['price']:.2f}$</b>"]
     if r.get("prob") is not None and r.get("prob_base"):
-        facts.insert(0, f"סיכוי לעלות 30% לפני הסטופ <b>{r['prob']:.0%}</b> (ממוצע {r['prob_base']:.0%})")
+        facts.insert(0, f"{prob_label(r)} <b>{r['prob']:.0%}</b> (ממוצע {r['prob_base']:.0%})")
     if plan.get("stop"):
         facts.append(f"סטופ מוצע <b>{plan['stop']:.2f}$</b> (<bdi>{pct(plan['stop_pct'])}</bdi>)")
+    if plan.get("target"):
+        facts.append(f"יעד מוצע <b>{plan['target']:.2f}$</b> (<bdi>{pct(plan['target_pct'], sign=True)}</bdi>)")
     if plan.get("shares"):
         facts.append(f"פוזיציה מוצעת <b>{plan['shares']} מניות</b> בכ־{money_he(plan['value'])}")
         facts.append(f"הפסד מקסימלי בסטופ <b>{money_he(plan['risk_amount'])}</b>")
@@ -217,15 +226,17 @@ def write_html(res: dict, path: Path, show_titles: bool = True) -> Path:
 
 
 def write_csv(res: dict, path: Path) -> Path:
-    cols = ["ticker", "name", "pick", "upside", "risk", "price", "stop", "shares", "sector", "industry", "country",
-            "market_cap"] + list(SIGNAL_LABELS)
+    cols = ["ticker", "name", "pick", "upside", "risk", "price", "stop", "target", "prob", "shares", "sector",
+            "industry", "country", "market_cap"] + list(SIGNAL_LABELS)
     with open(path, "w", newline="", encoding="utf-8-sig") as fh:
         w = csv.writer(fh)
         w.writerow(cols)
         for r in res["results"]:
             plan = r.get("plan") or {}
             w.writerow([r["ticker"], r["name"], int(r["pick"]), r["upside"], r["risk"], round(r["price"], 2),
-                        plan.get("stop"), plan.get("shares"), r["sector"], r["industry"], r["country"],
+                        plan.get("stop"), plan.get("target"),
+                        round(r["prob"], 4) if r.get("prob") is not None else "", plan.get("shares"),
+                        r["sector"], r["industry"], r["country"],
                         r["market_cap"]] + [round(r["signals"][k].score, 3) if k in r["signals"] and r["signals"][k].conf > 0
                                             else "" for k in SIGNAL_LABELS])
     return path
@@ -250,9 +261,11 @@ def alert_text(res: dict, max_items: int = 10) -> str:
         line = f"פוטנציאל {r['upside']:.0f}, סיכון {r['risk']:.0f}, מחיר {r['price']:.2f}$"
         if plan.get("stop"):
             line += f", סטופ מוצע {plan['stop']:.2f}$"
+        if plan.get("target"):
+            line += f", יעד {plan['target']:.2f}$"
         lines.append(line)
         if r.get("prob") is not None and r.get("prob_base"):
-            lines.append(f"סיכוי לעלות 30% לפני הסטופ: {r['prob']:.0%} (ממוצע {r['prob_base']:.0%})")
+            lines.append(f"{prob_label(r)}: {r['prob']:.0%} (ממוצע {r['prob_base']:.0%})")
         for p in r["why"]["pros"][:3]:
             lines.append(f"- {p}")
         warn = (r["why"]["cons"] + r.get("risk_reasons", []))[:1]

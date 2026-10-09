@@ -76,7 +76,8 @@ def result_json(r: dict) -> dict:
         "news": [{"title": i["title"], "url": i.get("url", ""), "label": i.get("label", ""),
                   "tone": 1 if i.get("s", 0) > 0 else -1 if i.get("s", 0) < 0 else 0} for i in items],
         "closes": r.get("closes", []),
-        "prob": r.get("prob"), "prob_base": r.get("prob_base"),
+        "prob": r.get("prob"), "prob_base": r.get("prob_base"), "prob_hist": r.get("prob_hist"),
+        "prob_rule": r.get("prob_rule"),
     }
 
 

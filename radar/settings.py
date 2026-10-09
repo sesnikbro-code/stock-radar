@@ -35,6 +35,7 @@ DEFAULTS: dict = {
         "max_picks": 10,
         "min_upside_score": 60,
         "max_risk_score": 80,
+        "require_model_edge": True,   # skip picks whose probability level lost money in the model's test
         "history_period": "2y",
         "workers": 4,
     },
@@ -84,6 +85,7 @@ DEFAULTS: dict = {
         "account_size": 50_000,
         "risk_per_trade_pct": 1.0,
         "atr_stop_multiple": 2.5,
+        "target_r": 3.0,              # target = 3 x the distance to the stop
         "max_position_pct": 10.0,
         "earnings_blackout_days": 5,
     },
@@ -91,7 +93,8 @@ DEFAULTS: dict = {
         "enabled": True,
         "max_open_positions": 15,
         "max_hold_days": 90,
-        "trailing_stop": True,
+        "trailing_stop": False,       # follow the same plan the model was tested on: fixed stop + target
+        "take_profit": True,
     },
     "learning": {
         "enabled": True,
@@ -118,8 +121,10 @@ DEFAULTS: dict = {
         "years": 5,                 # years of history to learn from
         "max_tickers": 1000,        # stocks sampled across the market (big and small)
         "step_days": 5,             # one snapshot per week
-        "target": 0.30,             # the question: +30% ...
-        "horizon_days": 63,         # ... within 3 months, before the stop (risk.atr_stop_multiple x ATR)
+        "target_mode": "r",         # r = reach risk.target_r x the stop distance | pct = reach a fixed % (target)
+        "target": 0.30,             # only for target_mode pct
+        "horizon_days": 63,         # within 3 months, before the stop (risk.atr_stop_multiple x ATR)
+        "cost_pct": 0.2,            # trading costs per round trip, in %
         "folds": 5,
         "l2": 0.001,
         "earnings_yahoo_max": 800,  # stocks for which EPS surprises are fetched from Yahoo

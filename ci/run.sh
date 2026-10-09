@@ -21,14 +21,32 @@ fail_status() {
   printf '{"mode":"%s","ok":false,"message":"%s","finished":"%s"}\n' "$MODE" "$1" "$(date -u +%FT%TZ)" > docs/data/status.json
 }
 
-if [ -z "${RADAR_SKIP_INSTALL:-}" ] && ! { python -m pip install -q --upgrade pip && python -m pip install -q -r requirements.txt; }; then
-  fail_status "התקנת החבילות נכשלה בענן. נסה להריץ שוב מאוחר יותר."
-  exit 1
-fi
-
 # A queued run may have been checked out before an earlier run saved its results: refresh the app data.
 if git fetch -q origin main 2>/dev/null; then
   git checkout -q FETCH_HEAD -- docs/data 2>/dev/null || true
+fi
+
+# GitHub sometimes skips scheduled runs, so the workflow has backup times later in the morning.
+# A backup run stops here when today's scan already exists.
+if [ "${GITHUB_EVENT_NAME:-}" = schedule ] && [ "$MODE" = scan ] && python3 - <<'PY'
+import json, sys
+from datetime import datetime, timezone
+try:
+    day = json.load(open("docs/data/latest.json", encoding="utf-8"))["date"]
+except Exception:
+    sys.exit(1)
+sys.exit(0 if day == datetime.now(timezone.utc).date().isoformat() else 1)
+PY
+then
+  echo "today's scan already exists - nothing to do in this backup run"
+  echo skip > .radar_mode
+  echo 0 > .radar_rc
+  exit 0
+fi
+
+if [ -z "${RADAR_SKIP_INSTALL:-}" ] && ! { python -m pip install -q --upgrade pip && python -m pip install -q -r requirements.txt; }; then
+  fail_status "התקנת החבילות נכשלה בענן. נסה להריץ שוב מאוחר יותר."
+  exit 1
 fi
 
 # The journal (track record, paper trades, learned weights) lives on the 'radar-data' branch.
@@ -49,8 +67,8 @@ case "$MODE" in
     # first install or update: no demo data in the cloud, only real scans
     rm -rf docs/data/demo
     mkdir -p docs/data
-    if [ -f docs/data/latest.json ] && [ ! -f docs/data/model.json ]; then
-      msg="העדכון הותקן בהצלחה. עכשיו מתחיל אימון של מודל הסיכוי על 5 שנות היסטוריה אמיתית (כ-30 עד 60 דקות), ואחריו סריקה חדשה."
+    if [ -f docs/data/latest.json ] && [ "$(python3 ci/need_train.py 2>/dev/null)" = yes ]; then
+      msg="העדכון הותקן בהצלחה. עכשיו מתחיל אימון של מודל הסיכוי על 5 שנות היסטוריה אמיתית (כ-15 עד 40 דקות), ואחריו סריקה חדשה."
     elif [ -f docs/data/latest.json ]; then
       msg="העדכון הותקן בהצלחה."
     else
@@ -70,7 +88,7 @@ case "$MODE" in
     python run.py --export docs/data backtest || rc=$?
     ;;
   train)
-    date -u +%F > docs/data/model_attempt.txt
+    echo "$(date -u +%F) $(python3 ci/need_train.py --spec 2>/dev/null)" > docs/data/model_attempt.txt
     python run.py --export docs/data train || rc=$?
     ;;
   test-alert)

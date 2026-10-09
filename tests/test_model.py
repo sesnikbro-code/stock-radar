@@ -26,7 +26,7 @@ from radar.signals.earnings import earnings_drift_signal  # noqa: E402
 from radar.signals.technical import compute_panel_features, eligibility, scores_at  # noqa: E402
 from radar.sources import sec  # noqa: E402
 from radar.sources.market import YahooMarket, normalize_earnings  # noqa: E402
-from radar.train import make_labels  # noqa: E402
+from radar.train import simulate_trades, trade_stats  # noqa: E402
 
 
 def _zip(files: dict) -> bytes:
@@ -221,21 +221,48 @@ class TestModel(unittest.TestCase):
         self.assertFalse(np.isnan(z).any())
         self.assertEqual(z[0, 2], 0.0)  # missing -> average
 
-    def test_labels(self):
-        # 3 stocks, entry at next open = 10, ATR 1 -> stop 7.5, target 13
-        T = 10
-        O = np.full((T, 3), 10.0)
-        H = np.full((T, 3), 10.5)
-        L = np.full((T, 3), 9.5)
-        atr = np.ones((T, 3))
-        H[3, 0] = 13.5                  # stock 0: target first
-        L[2, 1] = 7.0
-        H[4, 1] = 14.0                  # stock 1: stop first
-        H[3, 2], L[3, 2] = 13.5, 7.0    # stock 2: both the same day -> counted as a loss
-        y = make_labels(O, H, L, atr, [0], 5, 0.30, 2.5)[0]
-        self.assertEqual(list(y), [1.0, 0.0, 0.0])
+    def test_trade_simulation(self):
+        # 5 stocks. Entry at the next open = 10, ATR 1 -> stop 7.5 (risk 2.5), target 3R = 17.5
+        T, W = 12, 6
+        O = np.full((T, 5), 10.0)
+        H = np.full((T, 5), 10.5)
+        L = np.full((T, 5), 9.5)
+        C = np.full((T, 5), 10.2)
+        atr = np.ones((T, 5))
+        H[3, 0] = 18.0                          # stock 0: target first -> sold at 17.5
+        L[2, 1] = 7.0                           # stock 1: stop first -> sold at 7.5
+        H[3, 2], L[3, 2] = 18.0, 7.0            # stock 2: both the same day -> counted as the stop
+        O[4, 3], H[4, 3], L[4, 3] = 6.0, 6.5, 5.5   # stock 3: gaps below the stop -> sold at the open (6.0)
+        C[1:7, 4] = 11.0                        # stock 4: neither -> sold at the last close (11.0)
+        spy_o, spy_c = np.full(T, 100.0), np.full(T, 101.0)
+        t = simulate_trades(O, H, L, C, atr, [0], W, 2.5, target_r=3.0, cost=0.0, spy_open=spy_o, spy_close=spy_c)
+        self.assertEqual(list(t["y"][0]), [1.0, 0.0, 0.0, 0.0, 0.0])
+        self.assertEqual(list(t["kind"][0]), [1.0, -1.0, -1.0, -1.0, 0.0])
+        np.testing.assert_allclose(t["ret"][0], [0.75, -0.25, -0.25, -0.4, 0.1])
+        np.testing.assert_allclose(t["r"][0], [3.0, -1.0, -1.0, -1.6, 0.4])
+        self.assertEqual(list(t["days"][0]), [3.0, 2.0, 3.0, 4.0, 6.0])
+        np.testing.assert_allclose(t["spy"][0], [0.01] * 5)
+        # costs and the old fixed-% question
+        t2 = simulate_trades(O, H, L, C, atr, [0], W, 2.5, target_pct=0.30, cost=0.002)
+        self.assertEqual(t2["y"][0][0], 1.0)
+        self.assertAlmostEqual(t2["ret"][0][0], 0.30 - 0.002)
         atr[0, 0] = np.nan
-        self.assertTrue(np.isnan(make_labels(O, H, L, atr, [0], 5, 0.30, 2.5)[0][0]))
+        self.assertTrue(np.isnan(simulate_trades(O, H, L, C, atr, [0], W, 2.5, target_r=3.0)["y"][0][0]))
+        df = pd.DataFrame({k: v[0] for k, v in t.items()})
+        st = trade_stats(df)
+        self.assertAlmostEqual(st["ret"], np.mean([0.75, -0.25, -0.25, -0.4, 0.1]))
+        self.assertAlmostEqual(st["stop"], 0.6)
+        self.assertAlmostEqual(st["win"], 0.4)
+        self.assertAlmostEqual(st["excess"], st["ret"] - 0.01)
+
+    def test_plan_target(self):
+        from radar.scoring import position_plan
+
+        plan = position_plan(100.0, 4.0, {"account_size": 50000, "risk_per_trade_pct": 1.0, "atr_stop_multiple": 2.5,
+                                           "max_position_pct": 10.0, "target_r": 3.0})
+        self.assertEqual(plan["stop"], 90.0)
+        self.assertEqual(plan["target"], 130.0)
+        self.assertAlmostEqual(plan["target_pct"], 0.30)
 
     def test_signals(self):
         s = earnings_drift_signal({"earn_recent": 1.0, "earn_reaction": 0.09, "earn_surprise": 0.2, "earn_age": 0.1})
@@ -271,9 +298,17 @@ class TestTrainEndToEnd(unittest.TestCase):
             meta = train_model(s, demo=True, out_path=path)
             v = meta["validation"]
             self.assertGreater(meta["n_rows"], 5000)
-            self.assertGreater(v["auc"], 0.55)               # the demo market has real (synthetic) structure
+            self.assertGreater(v["auc"], 0.53)               # the demo market has real (synthetic) structure
             self.assertGreater(v["top_rate"], v["base"])
             self.assertEqual(len(v["deciles"]), 10)
+            self.assertTrue(all(d["p_lo"] <= d["p_hi"] and d["ret"] is not None for d in v["deciles"]))
+            money = v["money"]
+            self.assertGreater(money["model"]["ret"], money["all"]["ret"])
+            self.assertIn("spy", money["all"])
+            self.assertTrue(v["passed"])
+            self.assertEqual(meta["spec"], "v2:r3:atr2.5:h63")
+            self.assertEqual(meta["target_mode"], "r")
+            self.assertTrue(all("ret" in w for w in meta["what_worked"]))
             self.assertTrue(meta["what_worked"])
             self.assertTrue(meta["coverage"]["insider"])
             self.assertLess(model_age_days(path), 1)
@@ -282,6 +317,9 @@ class TestTrainEndToEnd(unittest.TestCase):
             res = run_scan(s, demo=True, model_path=path)
             probs = [r["prob"] for r in res["results"]]
             self.assertTrue(all(p is not None and 0 < p < 1 for p in probs))
+            self.assertTrue(all(r["prob_hist"] and r["prob_rule"]["mode"] == "r" for r in res["results"]))
+            self.assertTrue(all(r["prob_hist"]["ret"] > 0 for r in res["picks"]))   # no picks with a losing history
+            self.assertTrue(all(r["plan"].get("target") for r in res["picks"]))
             self.assertIn("model", res["results"][0]["signals"])
             self.assertIn("earnings_drift", res["results"][0]["signals"])
             j = scan_json(res)
@@ -292,18 +330,51 @@ class TestTrainEndToEnd(unittest.TestCase):
             s2 = _settings(d)
             from radar.pipeline import load_model
             self.assertIsNone(load_model(s2, False, path))
+            # a model trained for another question is not used either (e.g. after changing the target)
+            self.assertIsNotNone(load_model(s, True, path))
+            s.cfg["risk"]["target_r"] = 2.0
+            self.assertIsNone(load_model(s, True, path))
+            s.cfg["risk"]["target_r"] = 3.0
             # without a model, the model weight is switched off and the scan still works
             res2 = run_scan(s, demo=True, model_path=Path(d) / "missing.json")
             self.assertTrue(all(r["prob"] is None for r in res2["results"]))
             self.assertEqual(res2["weights"]["model"], 0.0)
 
 
+class TestPaperPlan(unittest.TestCase):
+    def test_paper_takes_profit_at_target(self):
+        from radar.journal import Journal
+
+        with tempfile.TemporaryDirectory() as d:
+            j = Journal(Path(d) / "j.sqlite")
+            idx = pd.bdate_range(end=pd.Timestamp(date.today()), periods=20)
+            c = pd.Series(20.0, index=idx)
+            h = c + 0.5
+            h.iloc[10] = 40.0                       # a spike far above the target
+            panel = {"Close": pd.DataFrame({"X": c}), "Open": pd.DataFrame({"X": c}),
+                     "High": pd.DataFrame({"X": h}), "Low": pd.DataFrame({"X": c - 0.5})}
+            j.paper_open([{"ticker": "X", "price": 20.0, "atr": 0.8, "plan": {"stop": 18.0, "shares": 10}}],
+                         idx[2].date(), 10)
+            cfg = {"trailing_stop": False, "max_hold_days": 90}
+            j.paper_update(panel, date.today(), cfg, 2.5, target_r=3.0)
+            row = j._rows()[0]
+            self.assertEqual(row["status"], "closed")
+            self.assertEqual(row["exit_reason"], "target")
+            self.assertAlmostEqual(row["exit_price"], 26.0)   # entry 20 + 3 x 2
+            j.paper_update(panel, date.today(), cfg, 2.5, target_r=3.0)   # running again changes nothing
+            self.assertEqual(j._rows()[0]["exit_price"], 26.0)
+            self.assertEqual(j.paper_summary(None, 3.0)["closed_positions"][0]["reason"], "target")
+            j.close()
+
+
 class TestCloudScripts(unittest.TestCase):
-    def _need(self, root: Path) -> str:
+    def _need(self, root: Path, *args) -> str:
         script = (ROOT / "ci" / "need_train.py").read_text(encoding="utf-8")
         (root / "ci").mkdir(parents=True, exist_ok=True)
         (root / "ci" / "need_train.py").write_text(script, encoding="utf-8")
-        return subprocess.run([sys.executable, str(root / "ci" / "need_train.py")], capture_output=True,
+        if not (root / "radar").exists():
+            (root / "radar").symlink_to(ROOT / "radar", target_is_directory=True)
+        return subprocess.run([sys.executable, str(root / "ci" / "need_train.py"), *args], capture_output=True,
                               text=True, check=True).stdout.strip()
 
     def test_need_train(self):
@@ -313,16 +384,22 @@ class TestCloudScripts(unittest.TestCase):
             data.mkdir(parents=True)
             (root / "config.yaml").write_text("train:\n  enabled: true\n  retrain_days: 30\nalerts:\n  x: 1\n",
                                               encoding="utf-8")
+            spec = self._need(root, "--spec")
+            self.assertTrue(spec.startswith("v2:r3"))
+            now = datetime.now(timezone.utc).isoformat()
             self.assertEqual(self._need(root), "yes")                  # no model yet
-            (data / "model_attempt.txt").write_text(date.today().isoformat(), encoding="utf-8")
+            (data / "model_attempt.txt").write_text(f"{date.today().isoformat()} {spec}", encoding="utf-8")
             self.assertEqual(self._need(root), "no")                   # tried today: wait
+            (data / "model_attempt.txt").write_text(f"{date.today().isoformat()} v1:old", encoding="utf-8")
+            self.assertEqual(self._need(root), "yes")                  # the earlier try was for another question
             (data / "model_attempt.txt").unlink()
             old = (datetime.now(timezone.utc) - timedelta(days=40)).isoformat()
-            (data / "model.json").write_text(json.dumps({"trained": old}), encoding="utf-8")
+            (data / "model.json").write_text(json.dumps({"trained": old, "spec": spec}), encoding="utf-8")
             self.assertEqual(self._need(root), "yes")                  # model too old
-            (data / "model.json").write_text(json.dumps({"trained": datetime.now(timezone.utc).isoformat()}),
-                                             encoding="utf-8")
+            (data / "model.json").write_text(json.dumps({"trained": now, "spec": spec}), encoding="utf-8")
             self.assertEqual(self._need(root), "no")                   # fresh model
+            (data / "model.json").write_text(json.dumps({"trained": now}), encoding="utf-8")
+            self.assertEqual(self._need(root), "yes")                  # fresh, but answers an older question
             (data / "model.json").unlink()
             (root / "config.yaml").write_text("train:\n  enabled: false\n", encoding="utf-8")
             self.assertEqual(self._need(root), "no")                   # switched off
@@ -330,8 +407,11 @@ class TestCloudScripts(unittest.TestCase):
     def test_shell_scripts_know_train(self):
         run = (ROOT / "ci" / "run.sh").read_text(encoding="utf-8")
         save = (ROOT / "ci" / "save.sh").read_text(encoding="utf-8")
+        wf = (ROOT / "ci" / "radar.yml").read_text(encoding="utf-8")
         self.assertIn("train)", run)
         self.assertIn("mode=train", save)
+        self.assertEqual(wf.count("- cron:"), 3)              # main time + two backups
+        self.assertIn("GITHUB_EVENT_NAME", run)                # backups skip when today's scan exists
         self.assertIn(".radar_rc", (ROOT / ".gitignore").read_text(encoding="utf-8"))
 
 

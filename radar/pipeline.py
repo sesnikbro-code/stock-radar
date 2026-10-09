@@ -11,7 +11,7 @@ import pandas as pd
 
 from .features import live_features
 from .journal import Journal
-from .model import ProbModel, probability_signal
+from .model import ProbModel, model_spec, probability_signal
 from .scoring import composite, expected_move_3m, position_plan, risk_score
 from .signals import SIGNAL_LABELS
 from .signals.analysts import (firm_accuracy, firm_calls_from_history, normalize_upgrades, ratings_signal,
@@ -192,6 +192,9 @@ def load_model(settings, demo: bool, model_path: Path | None) -> ProbModel | Non
     m = ProbModel.load(path) if path.exists() else None
     if m is not None and bool(m.meta.get("demo")) != bool(demo):
         return None  # never mix a demo model with real data (or the other way round)
+    if m is not None and m.meta.get("spec") != model_spec(settings):
+        log.info("מודל הסיכוי השמור עונה על שאלה אחרת מההגדרות הנוכחיות – לא בשימוש עד האימון הבא")
+        return None
     return m
 
 
@@ -289,13 +292,14 @@ def run_scan(settings, demo: bool = False, tickers: list[str] | None = None, pro
             td.options_history = journal.option_history(td.ticker, today)
             journal.add_option_volume(td.ticker, today, (opt.get("call_vol") or 0) + (opt.get("put_vol") or 0))
         sigs = build_signals(td, ctx, settings)
-        prob = None
+        prob, hist = None, None
         try:
             feats = live_features(td.tech, td.insider_rows, td.earnings, td.prices["Close"], spy, today)
             sigs["earnings_drift"] = earnings_drift_signal(feats)
             if model is not None and model.quality > 0:  # only a model that passed its out-of-sample test
                 prob = model.predict(feats)
                 sigs["model"] = probability_signal(prob, model)
+                hist = model.bucket(prob)
         except Exception as e:  # noqa: BLE001
             log.warning("חישוב מודל הסיכוי נכשל עבור %s: %s", td.ticker, e)
         upside, coverage = composite(sigs, weights)
@@ -310,6 +314,10 @@ def run_scan(settings, demo: bool = False, tickers: list[str] | None = None, pro
             "country": td.info.get("country", ""), "market_cap": num(td.info.get("marketCap")),
             "earnings_date": td.details.get("earnings_date"), "insider_source": td.insider_source,
             "prob": prob, "prob_base": model.base if model is not None and prob is not None else None,
+            "prob_hist": {k: hist.get(k) for k in ("ret", "rate", "stop", "win", "n")} if hist else None,
+            "prob_rule": {"mode": model.meta.get("target_mode") or "pct", "r": model.meta.get("target_r"),
+                          "pct": model.meta.get("target"), "horizon": model.meta.get("horizon")}
+            if model is not None and prob is not None else None,
             "closes": [None if pd.isna(v) else round(float(v), 4)
                        for v in panel["Close"][td.ticker].reindex(spark_idx).values],
             "pick": False,
@@ -322,6 +330,12 @@ def run_scan(settings, demo: bool = False, tickers: list[str] | None = None, pro
     if ctx.regime.get("risk_off"):
         max_picks, min_up = max(1, max_picks // 2), min_up + 5
     picks = [r for r in results if r["upside"] >= min_up and r["risk"] <= settings.get("scan.max_risk_score")]
+    if settings.get("scan.require_model_edge") and model is not None and model.quality > 0:
+        # stocks whose probability level lost money on average in the model's out-of-sample test are skipped
+        n0 = len(picks)
+        picks = [r for r in picks if not r.get("prob_hist") or (r["prob_hist"].get("ret") or 0) > 0]
+        if n0 != len(picks):
+            log.info("%d מניות לא נבחרו כי ברמת הסיכוי שלהן העסקאות הפסידו בממוצע בבדיקה", n0 - len(picks))
     picks = picks[:max_picks] if not tickers else picks
     for r in picks:
         r["pick"] = True
@@ -335,8 +349,9 @@ def run_scan(settings, demo: bool = False, tickers: list[str] | None = None, pro
             log.info("נבדקו %d המלצות עבר מול התוצאה בפועל", n_eval)
         if settings.get("paper.enabled"):
             journal.paper_open(picks, today, settings.get("paper.max_open_positions"))
-            journal.paper_update(panel, today, settings.get("paper"), settings.get("risk.atr_stop_multiple"))
-            paper = journal.paper_summary(spy)
+            journal.paper_update(panel, today, settings.get("paper"), settings.get("risk.atr_stop_multiple"),
+                                 settings.get("risk.target_r") if settings.get("paper.take_profit") else None)
+            paper = journal.paper_summary(spy, settings.get("risk.target_r") if settings.get("paper.take_profit") else None)
         if settings.get("learning.enabled"):
             learning = journal.learn(list(SIGNAL_LABELS), settings.get("learning"))
     journal.close()
@@ -351,6 +366,10 @@ def _model_summary(model: ProbModel | None) -> dict | None:
     if model is None:
         return None
     v = model.meta.get("validation") or {}
+    money = v.get("money") or {}
     return {"trained": model.meta.get("trained"), "base": model.base, "auc": v.get("auc"),
             "top_rate": v.get("top_rate"), "top_lift": v.get("top_lift"), "quality": model.quality,
-            "target": model.meta.get("target"), "horizon": model.meta.get("horizon")}
+            "passed": v.get("passed"), "target_mode": model.meta.get("target_mode"),
+            "target": model.meta.get("target"), "target_r": model.meta.get("target_r"),
+            "horizon": model.meta.get("horizon"), "stop_atr": model.meta.get("stop_atr"),
+            "top_ret": (money.get("model") or {}).get("ret"), "all_ret": (money.get("all") or {}).get("ret")}

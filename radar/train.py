@@ -1,12 +1,15 @@
 """Train and honestly test the probability model on years of real history.
 
-Question the model answers: "of stocks that looked like this on day t, how many rose +30% (from the next
-day's open) before falling to a 2.5 x ATR stop, within 63 trading days (about 3 months)?"
+Question the model answers (the app's own trading plan): "of stocks that looked like this on day t, how many
+reached the target (3 x the distance to a 2.5 x ATR stop) before the stop, within 63 trading days?"
+Because both the stop and the target scale with each stock's own volatility, wild stocks get no free
+advantage: the model has to find stocks that rise more than their usual swings explain.
 
 Data, all point-in-time: daily prices (Yahoo), every insider trade by SEC filing date (SEC quarterly data sets),
 earnings report dates (SEC 8-K item 2.02) with the market's reaction and, when Yahoo has it, the EPS surprise.
-Testing is walk-forward: the model is fitted on older years and scored on later years it never saw,
-with a 3-month gap so no outcome leaks from the training period into the test period."""
+Testing is walk-forward: the model is fitted on older years and scored on later years it never saw, with a
+3-month gap so no outcome leaks into the test. Every simulated trade is also measured in money (target, stop
+or time exit, gaps, costs) and compared with all stocks, the old technical screen and the S&P 500."""
 from __future__ import annotations
 
 import logging
@@ -20,7 +23,7 @@ import numpy as np
 import pandas as pd
 
 from .features import EARN, FEATURES, INSIDER, LABELS_HE, InsiderArrays, earnings_matrix, market_at, tech_frame
-from .model import ProbModel, Transform, auc, build_meta, fit_logistic, logit, sigmoid
+from .model import ProbModel, Transform, auc, build_meta, fit_logistic, logit, model_spec, sigmoid
 from .signals.technical import compute_panel_features, eligibility, scores_at
 from .sources import get_sources
 
@@ -65,46 +68,98 @@ def _sample(tickers: list[str], max_n: int) -> list[str]:
     return [tickers[int(i * step)] for i in range(max_n)]
 
 
-def make_labels(O: np.ndarray, H: np.ndarray, L: np.ndarray, atr: np.ndarray, positions, window: int,
-                target: float, stop_atr: float) -> np.ndarray:
-    """1 = reached entry*(1+target) before entry - stop_atr*ATR within `window` days (entry = next open).
-    A day that touches both counts as a loss. NaN = cannot be judged."""
-    out = np.full((len(positions), O.shape[1]), np.nan)
-    with np.errstate(invalid="ignore"):
+def simulate_trades(O: np.ndarray, H: np.ndarray, L: np.ndarray, C: np.ndarray, atr: np.ndarray, positions,
+                    window: int, stop_atr: float, target_r: float | None = None, target_pct: float | None = None,
+                    cost: float = 0.002, spy_open: np.ndarray | None = None,
+                    spy_close: np.ndarray | None = None) -> dict[str, np.ndarray]:
+    """Replays the app's trading plan for every stock on every snapshot day (arrays: snapshots x stocks).
+
+    Buy at the next day's open. Stop = entry - stop_atr x ATR. Target = entry + target_r x (entry - stop),
+    or entry x (1 + target_pct). If neither is hit within `window` days, sell at that day's close.
+    A gap through a level fills at the open; a day that touches both levels counts as the stop.
+    Returns y (1 = target first), ret (after costs), r (result in multiples of the risk), days,
+    kind (1 target, -1 stop, 0 time) and spy (S&P 500 over the same days). NaN = cannot be judged."""
+    P, N = len(positions), O.shape[1]
+    out = {k: np.full((P, N), np.nan) for k in ("y", "ret", "r", "days", "kind", "spy")}
+    cols = np.arange(N)
+    with np.errstate(invalid="ignore", divide="ignore"):
         for i, p in enumerate(positions):
-            entry, a = O[p + 1], atr[p]
-            stop, tgt = entry - stop_atr * a, entry * (1 + target)
-            hw, lw = H[p + 1:p + 1 + window], L[p + 1:p + 1 + window]
+            if p + window >= len(O):
+                continue
+            e, a = O[p + 1], atr[p]
+            risk = stop_atr * a
+            stop = e - risk
+            tgt = e + target_r * risk if target_r else e * (1 + float(target_pct))
+            sl = slice(p + 1, p + 1 + window)
+            hw, lw, ow = H[sl], L[sl], O[sl]
             ht, hs = hw >= tgt, lw <= stop
-            ft = np.where(ht.any(0), ht.argmax(0), window + 1)
-            fs = np.where(hs.any(0), hs.argmax(0), window + 1)
-            y = ((ft < fs) & (ft < window)).astype(float)
-            bad = np.isnan(entry) | np.isnan(a) | ~(a > 0) | ~(stop > 0) | (len(hw) < window)
-            y[bad] = np.nan
-            out[i] = y
+            ft = np.where(ht.any(0), ht.argmax(0), window)
+            fs = np.where(hs.any(0), hs.argmax(0), window)
+            hit_t = ft < fs                                   # same day as the stop -> counted as the stop
+            hit_s = (fs <= ft) & (fs < window)
+            ftc, fsc = np.minimum(ft, window - 1), np.minimum(fs, window - 1)
+            o_t, o_s = ow[ftc, cols], ow[fsc, cols]
+            px_t = np.where(o_t >= tgt, o_t, tgt)             # opened above the target: sold at the open
+            px_s = np.where((fsc > 0) & (o_s <= stop), o_s, stop)  # opened below the stop: sold at the open
+            last = pd.DataFrame(C[sl]).ffill().to_numpy()[-1]
+            exit_px = np.where(hit_t, px_t, np.where(hit_s, px_s, last))
+            held = np.where(hit_t, ftc + 1, np.where(hit_s, fsc + 1, window)).astype(int)
+            ret = exit_px / e - 1 - cost
+            bad = np.isnan(e) | np.isnan(a) | ~(a > 0) | ~(stop > 0) | np.isnan(exit_px)
+            row = {"y": hit_t.astype(float), "ret": ret, "r": ret * e / risk, "days": held.astype(float),
+                   "kind": np.where(hit_t, 1.0, np.where(hit_s, -1.0, 0.0))}
+            if spy_open is not None and spy_close is not None:
+                row["spy"] = spy_close[np.minimum(p + held, len(spy_close) - 1)] / spy_open[p + 1] - 1
+            for k, v in row.items():
+                v = np.asarray(v, dtype=float).copy()
+                v[bad] = np.nan
+                out[k][i] = v
     return out
+
+
+def trade_stats(df: pd.DataFrame) -> dict | None:
+    """Average result of a set of simulated trades."""
+    if df is None or not len(df):
+        return None
+    ret = df["ret"].to_numpy(dtype=float)
+    spy = df["spy"].to_numpy(dtype=float) if "spy" in df else np.full(len(df), np.nan)
+    out = {"n": int(len(df)), "hit": float(df["y"].mean()), "ret": float(np.nanmean(ret)),
+           "med": float(np.nanmedian(ret)), "win": float(np.nanmean(ret > 0)),
+           "stop": float((df["kind"] == -1).mean()), "target": float((df["kind"] == 1).mean()),
+           "r": float(df["r"].mean()), "days": float(df["days"].mean())}
+    if np.isfinite(spy).any():
+        out["spy"] = float(np.nanmean(spy))
+        out["excess"] = float(np.nanmean(ret - spy))
+    return out
+
+
+def _top(df: pd.DataFrame, col: str, n: int) -> pd.DataFrame:
+    return df.sort_values(col, ascending=False).groupby("pos", sort=False).head(n)
 
 
 def _what_worked(D: pd.DataFrame, min_n: int) -> list[dict]:
     y, base = D["y"].to_numpy(), float(D["y"].mean())
+    ret = D["ret"].to_numpy(dtype=float)
     out = []
     for key, (hi_txt, lo_txt) in _RANKED.items():
         r = D.groupby("pos")[key].rank(pct=True)
         for txt, m in ((hi_txt, r >= 0.8), (lo_txt, r <= 0.2)):
             m = m.fillna(False).to_numpy()
             if m.sum() >= min_n:
-                out.append({"key": key, "text": txt, "rate": float(y[m].mean()), "n": int(m.sum())})
+                out.append({"key": key, "text": txt, "rate": float(y[m].mean()), "ret": float(np.nanmean(ret[m])),
+                            "n": int(m.sum())})
     for key, txt, fn in _FIXED:
         m = fn(D).fillna(False).to_numpy(dtype=bool)
         if m.sum() >= min_n:
-            out.append({"key": key, "text": txt, "rate": float(y[m].mean()), "n": int(m.sum())})
+            out.append({"key": key, "text": txt, "rate": float(y[m].mean()), "ret": float(np.nanmean(ret[m])),
+                        "n": int(m.sum())})
     for o in out:
         o["lift"] = o["rate"] / base if base else None
     return sorted(out, key=lambda o: -(o["lift"] or 0))
 
 
 def _top_rate(df: pd.DataFrame, col: str, n: int) -> tuple[float | None, int]:
-    top = df.sort_values(col, ascending=False).groupby("pos", sort=False).head(n)
+    top = _top(df, col, n)
     return (float(top["y"].mean()) if len(top) else None), len(top)
 
 
@@ -144,7 +199,11 @@ def _events_for(src, cols, meta_u, since, cfg, progress_every=100):
 def train_model(settings, demo: bool = False, out_path: Path | None = None) -> dict:
     cfg, filters = settings.get("train"), settings.get("filters")
     years, W = int(cfg["years"]), int(cfg["horizon_days"])
-    target, k = float(cfg["target"]), float(settings.get("risk.atr_stop_multiple"))
+    k = float(settings.get("risk.atr_stop_multiple"))
+    mode = str(cfg.get("target_mode", "r")).lower()
+    target_r = float(settings.get("risk.target_r", 3.0)) if mode != "pct" else None
+    target_pct = float(cfg["target"]) if mode == "pct" else None
+    cost = float(cfg.get("cost_pct", 0.2)) / 100
     step, top_n = int(cfg["step_days"]), int(settings.get("scan.max_picks") or 10)
     src = get_sources(settings, demo)
 
@@ -192,7 +251,11 @@ def train_model(settings, demo: bool = False, out_path: Path | None = None) -> d
     H = panel["High"][cols].to_numpy(dtype=float)
     L = panel["Low"][cols].to_numpy(dtype=float)
     atr = f["atr14"][cols].to_numpy(dtype=float)
-    Y = make_labels(O, H, L, atr, positions, W, target, k)
+    spy_o = panel["Open"]["SPY"].ffill().to_numpy(dtype=float) if spy is not None else None
+    spy_c = spy.ffill().to_numpy(dtype=float) if spy is not None else None
+    tr_ = simulate_trades(O, H, L, C[cols].to_numpy(dtype=float), atr, positions, W, k, target_r, target_pct, cost,
+                          spy_o, spy_c)
+    Y = tr_["y"]
     weights = settings.get("weights")
     parts = []
     for i, p in enumerate(positions):
@@ -203,7 +266,9 @@ def train_model(settings, demo: bool = False, out_path: Path | None = None) -> d
         tf = tech_frame(f, t).reindex(cols)[ok]
         sc = scores_at(f, t, elig.loc[t], weights)
         tf["tech_score"] = sc["tech_score"].reindex(tf.index) if "tech_score" in sc else np.nan
-        tf["y"], tf["pos"] = Y[i][ok], p
+        tf["pos"] = p
+        for kk in ("y", "ret", "r", "days", "kind", "spy"):
+            tf[kk] = tr_[kk][i][ok]
         for kk, v in (market_at(spy, p) if spy is not None else {}).items():
             tf[kk] = v
         parts.append(tf)
@@ -238,8 +303,10 @@ def train_model(settings, demo: bool = False, out_path: Path | None = None) -> d
         D[kk] = earn_cols[kk]
     D = D.sort_values(["pos", "ticker"]).reset_index(drop=True)
     X, y, pos = D[FEATURES].to_numpy(dtype=float), D["y"].to_numpy(dtype=float), D["pos"].to_numpy()
-    log.info("מאגר האימון: %d תצפיות, %d מניות, %d ימים. בסיס: %.1f%% הגיעו ל־+%d%% לפני הסטופ",
-             len(D), D["ticker"].nunique(), len(positions), 100 * y.mean(), round(target * 100))
+    goal = f"פי {target_r:g} מהסטופ" if target_r else f"+{target_pct:.0%}"
+    log.info("מאגר האימון: %d תצפיות, %d מניות, %d ימים. בסיס: %.1f%% הגיעו ליעד (%s) לפני הסטופ, "
+             "עסקה ממוצעת %+.2f%%", len(D), D["ticker"].nunique(), len(positions), 100 * y.mean(), goal,
+             100 * float(D["ret"].mean()))
 
     # 6. walk-forward test ------------------------------------------------------------------
     upos = np.array(sorted(set(pos)))
@@ -264,25 +331,40 @@ def train_model(settings, demo: bool = False, out_path: Path | None = None) -> d
     base = float(T["y"].mean())
     top_rate, top_cnt = _top_rate(T, "p", top_n)
     tech_rate, _ = _top_rate(T.dropna(subset=["tech_score"]), "tech_score", top_n)
+    money = {"model": trade_stats(_top(T, "p", top_n)),
+             "tech": trade_stats(_top(T.dropna(subset=["tech_score"]), "tech_score", top_n)),
+             "all": trade_stats(T)}
     q = pd.qcut(T["p"].rank(method="first"), 10, labels=False)
-    deciles = [{"p": float(T["p"][q == i].mean()), "rate": float(T["y"][q == i].mean()), "n": int((q == i).sum())}
-               for i in range(10)]
+    deciles = []
+    for i in range(10):
+        g = T[q == i]
+        st = trade_stats(g) or {}
+        deciles.append({"p": float(g["p"].mean()), "p_lo": float(g["p"].min()), "p_hi": float(g["p"].max()),
+                        "rate": float(g["y"].mean()), "ret": st.get("ret"), "r": st.get("r"),
+                        "stop": st.get("stop"), "win": st.get("win"), "n": int(len(g))})
     T["year"] = dates[T["pos"].to_numpy()].year
     by_year = []
     for yr, g in T.groupby("year"):
-        r, _n = _top_rate(g, "p", top_n)
-        by_year.append({"year": int(yr), "top": r, "base": float(g["y"].mean()), "n": int(len(g))})
+        tp = trade_stats(_top(g, "p", top_n)) or {}
+        al = trade_stats(g) or {}
+        by_year.append({"year": int(yr), "top": tp.get("hit"), "base": al.get("hit"), "top_ret": tp.get("ret"),
+                        "base_ret": al.get("ret"), "spy": al.get("spy"), "n": int(len(g))})
     a = auc(T["y"].to_numpy(), T["p"].to_numpy())
+    top_lift = (top_rate / base) if top_rate is not None and base else None
+    mm, ma = money["model"] or {}, money["all"] or {}
+    money_ok = mm.get("ret") is not None and ma.get("ret") is not None and mm["ret"] > ma["ret"] and mm["ret"] > 0
+    auc_q = max(0.0, min(1.0, ((a or 0.5) - 0.52) / 0.06))
+    passed = bool(auc_q > 0 and money_ok and (top_lift or 0) >= 1.1)
+    quality = auc_q if passed else 0.0
     validation = {
-        "auc": a, "base": base, "top_n": top_n, "top_rate": top_rate, "top_count": top_cnt,
-        "top_lift": (top_rate / base) if top_rate is not None and base else None,
-        "tech_top_rate": tech_rate, "n_test": int(m.sum()),
+        "auc": a, "base": base, "top_n": top_n, "top_rate": top_rate, "top_count": top_cnt, "top_lift": top_lift,
+        "tech_top_rate": tech_rate, "n_test": int(m.sum()), "money": money, "passed": passed,
         "test_start": dates[int(T["pos"].min())].date(), "test_end": dates[int(T["pos"].max())].date(),
         "deciles": deciles, "by_year": by_year,
     }
-    log.info("בדיקה על תקופה שהמודל לא ראה: AUC %.3f, %d המובילות %.1f%% מול ממוצע %.1f%% (הסינון הטכני: %s)",
-             a or 0, top_n, 100 * (top_rate or 0), 100 * base,
-             f"{100 * tech_rate:.1f}%" if tech_rate is not None else "-")
+    log.info("בדיקה על תקופה שהמודל לא ראה: AUC %.3f. %d המובילות: הגיעו ליעד %.1f%% (ממוצע %.1f%%), "
+             "עסקה ממוצעת %+.2f%% מול %+.2f%% לכל המניות. %s", a or 0, top_n, 100 * (top_rate or 0), 100 * base,
+             100 * (mm.get("ret") or 0), 100 * (ma.get("ret") or 0), "עבר את הבדיקה" if passed else "לא עבר את הבדיקה")
 
     # 7. final model on everything ------------------------------------------------------------
     tff = Transform.fit(X, FEATURES)
@@ -295,7 +377,8 @@ def train_model(settings, demo: bool = False, out_path: Path | None = None) -> d
         "yahoo_tries": ystate["yahoo_tries"], "yahoo_hits": ystate["yahoo_hits"],
     }
     meta = build_meta(
-        FEATURES, tff, w, demo=demo, years=years, target=target, horizon=W, stop_atr=k,
+        FEATURES, tff, w, demo=demo, years=years, spec=model_spec(settings), target_mode="pct" if target_pct else "r",
+        target=target_pct, target_r=target_r, horizon=W, stop_atr=k, cost=cost, quality=quality,
         base_rate=base, base_all=float(y.mean()), n_rows=len(D), n_tickers=n_tk, n_dates=len(positions),
         period={"start": dates[positions[0]].date(), "end": dates[positions[-1]].date()},
         calibration={"a": float(cal[0]), "b": float(cal[1])}, validation=validation,

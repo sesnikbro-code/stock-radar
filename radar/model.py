@@ -112,14 +112,19 @@ class ProbModel:
 
     @property
     def quality(self) -> float:
-        """0 = no better than chance (ignored), 1 = clearly useful out of sample."""
-        v = self.meta.get("validation") or {}
-        a = v.get("auc")
-        lift = v.get("top_lift") or 0
-        if a is None:
-            return 0.0
-        q = clip((a - 0.52) / 0.08, 0, 1)
-        return q if lift >= 1.1 else q * 0.5
+        """0 = failed its out-of-sample test (ignored), 1 = clearly useful (set by train.py)."""
+        q = self.meta.get("quality")
+        return float(q) if isinstance(q, (int, float)) else 0.0
+
+    def bucket(self, p: float) -> dict | None:
+        """What happened in the out-of-sample test to stocks that got a similar probability."""
+        dec = (self.meta.get("validation") or {}).get("deciles") or []
+        if not dec or p is None:
+            return None
+        for d in dec:
+            if d.get("p_hi") is not None and p <= d["p_hi"]:
+                return d
+        return dec[-1]
 
     def raw_matrix(self, rows: list[dict]) -> np.ndarray:
         return np.array([[float(r.get(k, np.nan)) if r.get(k) is not None else np.nan for k in self.features]
@@ -166,8 +171,20 @@ def _clean(o):
     return o
 
 
+VERSION = 2
+
+
+def model_spec(settings) -> str:
+    """The exact question the model answers. A model is only used when it answers today's question."""
+    stop = float(settings.get("risk.atr_stop_multiple"))
+    h = int(settings.get("train.horizon_days"))
+    if str(settings.get("train.target_mode", "r")).lower() == "pct":
+        return f"v{VERSION}:pct{float(settings.get('train.target')):g}:atr{stop:g}:h{h}"
+    return f"v{VERSION}:r{float(settings.get('risk.target_r')):g}:atr{stop:g}:h{h}"
+
+
 def build_meta(features: list[str], tf: Transform, coef: np.ndarray, **extra) -> dict:
-    return {"version": 1, "features": features, "transform": tf.to_json(), "coef": coef.tolist(),
+    return {"version": VERSION, "features": features, "transform": tf.to_json(), "coef": coef.tolist(),
             "trained": datetime.now(timezone.utc).isoformat(timespec="seconds"), **extra}
 
 

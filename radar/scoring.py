@@ -81,6 +81,9 @@ def position_plan(price: float, atr: float | None, risk_cfg: dict) -> dict:
     max_value = account * risk_cfg["max_position_pct"] / 100
     if shares * price > max_value:
         shares = int(max_value // price)
+    target_r = float(risk_cfg.get("target_r") or 0)
+    target = price + target_r * risk_per_share if target_r > 0 else None
     return {"stop": round(stop, 2), "stop_pct": stop / price - 1, "shares": shares,
+            "target": round(target, 2) if target else None, "target_pct": (target / price - 1) if target else None,
             "value": round(shares * price, 2), "risk_amount": round(shares * risk_per_share, 2),
             "pct_of_account": shares * price / account if account else 0}

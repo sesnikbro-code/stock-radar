@@ -136,15 +136,24 @@ def cmd_train(s, args) -> str:
         s.cfg["train"]["max_tickers"] = args.max_tickers
     meta = train_model(s, demo=args.demo, out_path=_model_path(s, args))
     v = meta["validation"]
-    top, base, tech = v.get("top_rate"), v.get("base"), v.get("tech_top_rate")
-    print(f"\nמאגר: {meta['n_tickers']} מניות, {meta['n_rows']} תצפיות, {meta['years']} שנים")
+    money = v.get("money") or {}
+    mm, ma, mt = money.get("model") or {}, money.get("all") or {}, money.get("tech") or {}
+    goal = f"פי {meta['target_r']:g} מהמרחק לסטופ" if meta.get("target_r") else f"+{meta['target']:.0%}"
+    print(f"\nמאגר: {meta['n_tickers']} מניות, {meta['n_rows']} תצפיות, {meta['years']} שנים. יעד: {goal}")
     print(f"בדיקה על תקופה שהמודל לא ראה ({v['test_start']} עד {v['test_end']}):")
-    print(f"  {v['top_n']} המובילות של המודל הגיעו ל-+{meta['target']:.0%} לפני הסטופ ב-{top:.1%} מהמקרים")
-    print(f"  ממוצע כל המניות: {base:.1%}" + (f", הסינון הטכני הקיים: {tech:.1%}" if tech is not None else ""))
-    print(f"  AUC: {v['auc']:.3f} (0.5 = ניחוש, 1 = מושלם)")
-    lift = f"פי {top / base:.1f} מהממוצע" if top and base else "בלי יתרון ברור על הממוצע"
+    print(f"  {v['top_n']} המובילות של המודל: הגיעו ליעד ב-{v['top_rate']:.1%}, עסקה ממוצעת {mm.get('ret', 0):+.2%}, "
+          f"נעצרו בסטופ {mm.get('stop', 0):.0%}")
+    print(f"  כל המניות: הגיעו ליעד ב-{v['base']:.1%}, עסקה ממוצעת {ma.get('ret', 0):+.2%}")
+    if mt:
+        print(f"  הסינון הטכני הישן: עסקה ממוצעת {mt.get('ret', 0):+.2%}")
+    if mm.get("spy") is not None:
+        print(f"  S&P 500 באותם ימים: {mm['spy']:+.2%}")
+    print(f"  AUC: {v['auc']:.3f} (0.5 = ניחוש). " + ("עבר את הבדיקה." if v.get("passed") else "לא עבר את הבדיקה."))
+    verdict = ("המודל עבר את הבדיקה ומשפיע על הציונים." if v.get("passed")
+               else "המודל לא עבר את הבדיקה ולכן לא משפיע על הציונים.")
     return (f"מודל הסיכוי אומן על {meta['n_tickers']} מניות ב-{meta['years']} שנים. בבדיקה על שנים שלא ראה, "
-            f"{v['top_n']} המובילות שלו הגיעו ל-+{meta['target']:.0%} לפני הסטופ ב-{top:.0%} מהמקרים, {lift} ({base:.0%}).")
+            f"{v['top_n']} המובילות שלו הניבו בממוצע {mm.get('ret', 0):+.1%} לעסקה, לעומת {ma.get('ret', 0):+.1%} "
+            f"לכל המניות. {verdict}")
 
 
 def cmd_test_alert(s, args) -> str:

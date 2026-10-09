@@ -201,7 +201,10 @@ class Journal:
         self.conn.commit()
         return opened
 
-    def paper_update(self, panel: dict[str, pd.DataFrame], today: date, cfg: dict, atr_mult: float) -> None:
+    def paper_update(self, panel: dict[str, pd.DataFrame], today: date, cfg: dict, atr_mult: float,
+                     target_r: float | None = None) -> None:
+        """Replays every open position from its entry with the app's plan: stop, optional target
+        (entry + target_r x the initial risk), optional trailing stop, and a maximum holding time."""
         o, h, lo, c = panel["Open"], panel["High"], panel["Low"], panel["Close"]
         for p in self.open_positions():
             t = p["ticker"]
@@ -223,14 +226,23 @@ class Journal:
                 first_is_fill = True
             else:
                 first_is_fill = False
-            stop, high_close = p["stop"], p["entry_price"]
+            stop, high_close = p["initial_stop"], p["entry_price"]   # replay from the entry: same result every day
+            risk = p["entry_price"] - p["initial_stop"]
+            target = p["entry_price"] + target_r * risk if target_r and risk > 0 else None
             exit_price = exit_date = reason = None
             for i, (d, b) in enumerate(bars.iterrows()):
-                if not (first_is_fill and i == 0) and b["o"] <= stop:   # gapped through the stop
+                first = first_is_fill and i == 0
+                if not first and b["o"] <= stop:   # gapped through the stop
                     exit_price, exit_date, reason = b["o"], d, "stop"
                     break
-                if b["l"] <= stop:
+                if target and not first and b["o"] >= target:   # gapped above the target
+                    exit_price, exit_date, reason = b["o"], d, "target"
+                    break
+                if b["l"] <= stop:   # a day that touches both counts as the stop (conservative)
                     exit_price, exit_date, reason = stop, d, "stop"
+                    break
+                if target and b["h"] >= target:
+                    exit_price, exit_date, reason = target, d, "target"
                     break
                 high_close = max(high_close, b["c"])
                 if cfg.get("trailing_stop") and p["atr"]:
@@ -248,7 +260,7 @@ class Journal:
                 self.conn.execute("UPDATE paper SET stop=?, last_price=? WHERE id=?", (stop, last, p["id"]))
         self.conn.commit()
 
-    def paper_summary(self, spy: pd.Series | None) -> dict:
+    def paper_summary(self, spy: pd.Series | None, target_r: float | None = None) -> dict:
         rows = self._rows()
         if not rows:
             return {"n": 0}
@@ -269,8 +281,11 @@ class Journal:
             base = s[s.index <= pd.Timestamp(first)]
             if len(base):
                 spy_ret = float(s.iloc[-1] / base.iloc[-1] - 1)
+        tgt = lambda r: (r["entry_price"] + target_r * (r["entry_price"] - r["initial_stop"])  # noqa: E731
+                         if target_r and r["initial_stop"] and r["entry_price"] > r["initial_stop"] else None)
         pos = lambda r, st: {"ticker": r["ticker"], "entry": r["entry_price"], "last": r["last_price"],  # noqa: E731
-                             "stop": r["stop"], "since": r["entry_date"], "status": st, "shares": r["shares"],
+                             "stop": r["stop"], "target": tgt(r), "since": r["entry_date"], "status": st,
+                             "shares": r["shares"],
                              "ret": (r["last_price"] or r["entry_price"]) / r["entry_price"] - 1 if st == "open" else 0.0}
         return {
             "n": len(rows), "open": len(open_), "pending": len(pending), "closed": len(closed), "since": first,
