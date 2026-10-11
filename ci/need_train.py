@@ -1,6 +1,8 @@
 """Prints 'yes' when the cloud should (re)train the probability model:
   - there is no model, or it answers a different question than config.yaml now asks (e.g. after an update), or
-  - it is older than train.retrain_days,
+  - it is older than train.retrain_days, or
+  - the self-review asked for it (the model picks worse live than in its test, or a suspected lesson waits for
+    its check on history) and the model is at least a week old,
 and the same question was not already attempted in the last 6 days (so a failing training does not loop)."""
 import json
 import re
@@ -34,6 +36,17 @@ def train_config() -> tuple[bool, int, str | None]:
     return enabled, int(d.group(1)) if d else 30, None
 
 
+def review_request(trained: datetime) -> bool:
+    """The self-review asked for an early retraining after this model was trained."""
+    try:
+        req = json.loads((DATA / "review.json").read_text(encoding="utf-8")).get("retrain_request") or {}
+        asked = date.fromisoformat(str(req.get("date"))[:10])
+    except (OSError, ValueError, TypeError, AttributeError):
+        return False
+    age = (datetime.now(timezone.utc) - trained).days
+    return bool(req.get("reasons")) and asked >= trained.date() and age >= 7
+
+
 def main() -> str:
     enabled, retrain_days, spec = train_config()
     if not enabled:
@@ -46,6 +59,8 @@ def main() -> str:
             trained = trained.replace(tzinfo=timezone.utc)
         same_question = spec is None or model.get("spec") == spec
         fresh = same_question and (datetime.now(timezone.utc) - trained).days < retrain_days
+        if fresh and review_request(trained):
+            fresh = False
     except (OSError, ValueError, KeyError, TypeError):
         pass
     if fresh:

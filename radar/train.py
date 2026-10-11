@@ -24,6 +24,7 @@ import pandas as pd
 
 from .features import (EARN, FEATURES, INDUSTRY, INSIDER, LABELS_HE, IndustryPeers, InsiderArrays, earnings_matrix,
                        market_at, tech_frame)
+from . import review as selfreview
 from .journal import spearman
 from .model import (GBM, KIND_HE, ProbModel, Transform, auc, build_meta, fit_logistic, fit_ridge, logit, model_spec,
                     sigmoid)
@@ -409,6 +410,12 @@ def train_model(settings, demo: bool = False, out_path: Path | None = None) -> d
         al = trade_stats(g) or {}
         by_year.append({"year": int(yr), "top": tp.get("hit"), "base": al.get("hit"), "top_ret": tp.get("ret"),
                         "base_ret": al.get("ret"), "spy": al.get("spy"), "n": int(len(g))})
+    # the self-review's lessons: for every situation it watches, would skipping it have improved the top picks?
+    thresholds = selfreview.compute_thresholds(D)
+    lesson_tests = selfreview.test_lessons(T, sel_pos, fin_pos, "p", top_n, thresholds)
+    ok = [k2 for k2, v in lesson_tests.items() if v["passed"]]
+    log.info("בדיקת לקחים אפשריים על ההיסטוריה: %d מתוך %d היו משפרים את הבחירות (%s)", len(ok), len(lesson_tests),
+             ", ".join(ok) or "אף אחד")
     a = auc(Bp["y"].to_numpy(), Bp["p"].to_numpy())
     pd_dates = lambda ps: (dates[int(min(ps))].date(), dates[int(max(ps))].date())  # noqa: E731
     sel_d, fin_d = pd_dates(sel_pos), pd_dates(fin_pos)
@@ -446,6 +453,7 @@ def train_model(settings, demo: bool = False, out_path: Path | None = None) -> d
         calibration={"a": float(cal[0]), "b": float(cal[1])}, validation=validation,
         what_worked=_what_worked(D, max(100, len(D) // 400)), coverage=coverage,
         labels={k2: LABELS_HE[k2] for k2 in FEATURES}, industry_map=peers.sic,
+        thresholds=thresholds, lesson_tests=lesson_tests,
     )
     model = ProbModel(meta)
     if out_path:

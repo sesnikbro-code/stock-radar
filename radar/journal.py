@@ -1,5 +1,6 @@
 """SQLite journal: every scored stock is logged, then checked after 30/90 days. This gives
-(1) an honest track record, (2) a paper-trading portfolio and (3) data for learning which signals work."""
+(1) an honest track record, (2) a paper-trading portfolio and (3) data for learning which signals work.
+The self-review (review.py) keeps its predictions, outcomes and log in the same file."""
 from __future__ import annotations
 
 import json
@@ -29,6 +30,16 @@ CREATE TABLE IF NOT EXISTS firm_calls (
     PRIMARY KEY (firm, ticker, date, direction));
 CREATE TABLE IF NOT EXISTS options_hist (ticker TEXT, date TEXT, total_vol REAL, PRIMARY KEY (ticker, date));
 CREATE TABLE IF NOT EXISTS weights (signal TEXT PRIMARY KEY, factor REAL, ic REAL, n INT, updated TEXT);
+CREATE TABLE IF NOT EXISTS predictions (
+    run_date TEXT, ticker TEXT, bar_date TEXT, pick INT, why_not TEXT, price REAL, atr REAL, cost REAL,
+    prob REAL, exp_ret REAL, bucket INT, model TEXT, upside REAL, risk REAL, sector TEXT, earnings_date TEXT,
+    risk_off INT, ext50 REAL, feats TEXT, signals TEXT, pros TEXT, PRIMARY KEY (run_date, ticker));
+CREATE TABLE IF NOT EXISTS outcomes (
+    run_date TEXT, ticker TEXT, status TEXT, entry_date TEXT, entry REAL, stop REAL, target REAL,
+    exit_date TEXT, exit REAL, kind INT, ret REAL, r REAL, days INT, spy REAL, mfe_r REAL,
+    ret21 REAL, spy21 REAL, PRIMARY KEY (run_date, ticker));
+CREATE TABLE IF NOT EXISTS review_log (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT, kind TEXT, text TEXT);
+CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT);
 """
 
 HORIZONS = (30, 90)
@@ -112,7 +123,10 @@ class Journal:
         return pd.read_sql_query(q, self.conn, params=(horizon,))
 
     # ------------------------------------------------------------ learning
-    def learn(self, signal_names: list[str], cfg: dict) -> dict:
+    def learn(self, signal_names: list[str], cfg: dict, skip: set | None = None) -> dict:
+        """30-day check of every signal. `skip`: signals whose weight the self-review already sets from the
+        plan-based results (it has the better measure once there is enough data)."""
+        skip = skip or set()
         h = int(cfg.get("horizon_days", 30))
         h = h if h in HORIZONS else 30
         df = self.evaluated_frame(h)
@@ -131,7 +145,7 @@ class Journal:
             ic = 0.0 if np.isnan(ic) else ic
             n = int(mask.sum())
             stats["signals"][name] = {"ic": ic, "n": n}
-            if n >= cfg.get("min_samples", 60):
+            if n >= cfg.get("min_samples", 60) and name not in skip:
                 f = clip(1 + cfg.get("gain", 5.0) * ic, cfg.get("min_factor", 0.25), cfg.get("max_factor", 2.0))
                 stats["factors"][name] = f
                 self.conn.execute("INSERT OR REPLACE INTO weights VALUES (?,?,?,?,?)",

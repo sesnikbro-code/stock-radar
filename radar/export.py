@@ -6,6 +6,7 @@
   tickers/SYM.json       on-demand single-stock analyses, tickers/index.json lists them
   backtest.json          latest backtest summary
   model.json             the probability model and its out-of-sample test (written by train.py)
+  review.json            the self-review: how its past recommendations really did and what it learned
   status.json            what ran last, when, and whether it worked
 """
 from __future__ import annotations
@@ -15,6 +16,7 @@ import math
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+from .review import brief as review_brief
 from .signals import SIGNAL_LABELS
 from .sources.countries import COUNTRY_HE, iso3_for
 from .util import he_industry, he_sector
@@ -77,7 +79,8 @@ def result_json(r: dict) -> dict:
                   "tone": 1 if i.get("s", 0) > 0 else -1 if i.get("s", 0) < 0 else 0} for i in items],
         "closes": r.get("closes", []),
         "prob": r.get("prob"), "prob_base": r.get("prob_base"), "prob_hist": r.get("prob_hist"),
-        "prob_rule": r.get("prob_rule"),
+        "prob_rule": r.get("prob_rule"), "prob_live": r.get("prob_live"), "prob_model": r.get("prob_model"),
+        "lesson": r.get("lesson"), "why_not": r.get("why_not"),
         # takeover / corporate events (SEC filings) and the inputs of the app's pre-entry checklist
         "exclude": r.get("exclude"), "deal": r.get("deal"), "flags": r.get("flags") or [],
         "filings_checked": bool(r.get("filings_checked")),
@@ -111,6 +114,7 @@ def scan_json(res: dict) -> dict:
         "learning": learning,
         "model": res.get("model"),
         "health": res.get("health"),
+        "review": review_brief(res.get("review")),
     }
 
 
@@ -123,6 +127,9 @@ def write_status(out_dir: Path, mode: str, ok: bool, message: str) -> None:
 def export_scan(res: dict, out_dir: Path, keep_days: int = 180) -> Path:
     out_dir = Path(out_dir)
     data = scan_json(res)
+    if res.get("review"):
+        _write(out_dir / ("demo/review.json" if res.get("demo") else "review.json"),
+               {"schema": SCHEMA, "demo": bool(res.get("demo")), **res["review"]})
     if res.get("demo"):
         _write(out_dir / "demo" / "latest.json", data)
         return out_dir / "demo" / "latest.json"

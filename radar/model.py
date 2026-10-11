@@ -269,6 +269,15 @@ class ProbModel:
                 return d
         return dec[-1]
 
+    def bucket_index(self, score: float) -> int | None:
+        dec = (self.meta.get("validation") or {}).get("deciles") or []
+        if not dec or score is None:
+            return None
+        for i, d in enumerate(dec):
+            if d.get("p_hi") is not None and score <= d["p_hi"]:
+                return i
+        return len(dec) - 1
+
     def raw_matrix(self, rows: list[dict]) -> np.ndarray:
         return np.array([[float(r.get(k, np.nan)) if r.get(k) is not None else np.nan for k in self.features]
                          for r in rows], dtype=float)
