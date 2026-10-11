@@ -318,3 +318,12 @@ ol.steps li::marker { font-weight: 700; color: var(--accent); }
   .radar-mark { width: 24px; height: 24px; }
   .day-btn { padding: 0 8px; }
 }
+.tour { margin: 6px 0 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; }
+.tour-row { padding: 7px 0; border-top: 1px solid var(--line); }
+.tour-row:first-of-type { border-top: 0; }
+.tour-row.chosen .tour-name { font-weight: 700; }
+.tour-name { font-size: 14px; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.tour-vals { display: flex; gap: 14px; flex-wrap: wrap; font-size: 13px; color: var(--muted); margin-top: 2px; }
+.tour-vals b { font-family: var(--font-data); direction: ltr; unicode-bidi: isolate; }
+.tour-bar { height: 6px; border-radius: 99px; background: var(--surface-2); margin-top: 5px; overflow: hidden; }
+.tour-bar i { display: block; height: 100%; border-radius: 99px; }

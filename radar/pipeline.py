@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
 
-from .features import live_features
+from .features import INSIDER_HISTORY_DAYS, IndustryPeers, live_features
 from .journal import Journal
 from .model import ProbModel, model_spec, probability_signal
 from .scoring import composite, expected_move_3m, position_plan, risk_score
@@ -81,6 +81,13 @@ def fetch_ticker(src, settings, t: str, meta: dict, tech: dict, panel, spy, disc
             rows = yahoo_insider_rows(det.get("insider_yahoo"))
             source = "Yahoo" if rows else ""
         td.insider_rows, td.insider_source = rows, source
+        if td.cik and source == "SEC" and any(r.get("code") == "P" for r in rows):
+            try:  # someone bought: look 15 months back to see whether this insider buys routinely
+                td.insider_rows_long = flatten_filings(src.insider(td.cik, INSIDER_HISTORY_DAYS, 120))
+            except Exception as e:  # noqa: BLE001
+                log.debug("long insider history failed for %s: %s", t, e)
+    if td.cik and hasattr(src, "company_sic"):
+        td.sic = src.company_sic(td.cik)
     if td.cik and settings.get("deals.enabled", True):
         try:  # same SEC filing list as the insider and earnings checks (cached), used for the takeover check
             recent = src.filings(td.cik)
@@ -309,6 +316,14 @@ def run_scan(settings, demo: bool = False, tickers: list[str] | None = None, pro
     if model is None or model.quality <= 0:
         weights["model"] = 0.0  # no tested model yet: don't let its empty slot dilute the other signals
     spark_idx = panel["Close"].index[-SPARK_DAYS:]
+    industry = {}
+    if model is not None and model.meta.get("industry_map"):
+        try:  # industry momentum from the same peer list the model was trained with
+            industry = IndustryPeers(model.meta["industry_map"]).frame(
+                feats["mom_6_1"].loc[t_last], feats["rs_63"].loc[t_last], eligibility(feats, filters).loc[t_last],
+                {td.ticker: td.sic for td in tds}).to_dict(orient="index")
+        except Exception as e:  # noqa: BLE001
+            log.warning("חישוב מומנטום הענפים נכשל: %s", e)
     results = []
     for td in tds:
         opt = td.details.get("options")
@@ -319,12 +334,17 @@ def run_scan(settings, demo: bool = False, tickers: list[str] | None = None, pro
         deal = corporate_events(td, sigs, today, settings.get("deals.enabled", True))
         prob, hist = None, None
         try:
-            feats = live_features(td.tech, td.insider_rows, td.earnings, td.prices["Close"], spy, today)
-            sigs["earnings_drift"] = earnings_drift_signal(feats)
+            long_rows = td.insider_rows_long
+            mf = live_features(td.tech, long_rows if long_rows is not None else td.insider_rows, td.earnings,
+                               td.prices["Close"], spy, today, industry=industry.get(td.ticker),
+                               insider_since=today - timedelta(days=INSIDER_HISTORY_DAYS if long_rows is not None
+                                                               else settings.get("insider.lookback_days")))
+            sigs["earnings_drift"] = earnings_drift_signal(mf)
             if model is not None and model.quality > 0:  # only a model that passed its out-of-sample test
-                prob = model.predict(feats)
-                sigs["model"] = probability_signal(prob, model)
-                hist = model.bucket(prob)
+                score = model.score(mf)
+                hist = model.bucket(score)
+                prob = model.display_prob(score, hist)
+                sigs["model"] = probability_signal(score, model, hist)
         except Exception as e:  # noqa: BLE001
             log.warning("חישוב מודל הסיכוי נכשל עבור %s: %s", td.ticker, e)
         upside, coverage = composite(sigs, weights)
@@ -425,4 +445,5 @@ def _model_summary(model: ProbModel | None) -> dict | None:
             "top_ret": (money.get("model") or {}).get("ret"), "all_ret": (money.get("all") or {}).get("ret"),
             "spy_ret": (money.get("model") or {}).get("spy"), "top_win": (money.get("model") or {}).get("win"),
             "top_stop": (money.get("model") or {}).get("stop"), "test_start": v.get("test_start"),
-            "test_end": v.get("test_end")}
+            "test_end": v.get("test_end"), "kind": model.kind, "sel_start": v.get("sel_start"),
+            "sel_end": v.get("sel_end"), "n_candidates": len(v.get("candidates") or [])}

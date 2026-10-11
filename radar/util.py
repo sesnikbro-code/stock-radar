@@ -72,6 +72,8 @@ class TickerData:
     info: dict = field(default_factory=dict)
     details: dict = field(default_factory=dict)
     insider_rows: list[dict] = field(default_factory=list)
+    insider_rows_long: list[dict] | None = None  # 15 months, only fetched when someone bought (first-buy check)
+    sic: str | None = None                        # SEC industry code
     insider_source: str = ""
     gov: dict | None = None
     news: list[dict] = field(default_factory=list)

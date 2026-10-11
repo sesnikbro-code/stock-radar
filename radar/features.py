@@ -11,12 +11,16 @@ from datetime import date
 import numpy as np
 import pandas as pd
 
-TECH = ["mom_6_1", "rs_63", "ret_21", "log_vol_ratio", "dist_high", "above_50", "trend_50_200", "squeeze",
-        "atr_pct", "rsi14", "log_dollar_vol", "log_price"]
-INSIDER = ["ins_buy", "ins_log_value", "ins_n_buyers", "ins_top_exec", "ins_hold_incr", "ins_net_sell"]
+TECH = ["mom_6_1", "rs_63", "ret_21", "ret_5", "max_ret_21", "log_vol_ratio", "dist_high", "above_50",
+        "trend_50_200", "squeeze", "atr_pct", "rsi14", "log_dollar_vol", "log_price"]
+INSIDER = ["ins_buy", "ins_log_value", "ins_n_buyers", "ins_top_exec", "ins_hold_incr", "ins_net_sell",
+           "ins_first_buy", "ins_first_value"]
 EARN = ["earn_recent", "earn_surprise", "earn_reaction", "earn_age"]
+INDUSTRY = ["ind_mom", "ind_rs"]
 MARKET = ["mkt_above_200", "mkt_ret_63"]
-FEATURES = TECH + INSIDER + EARN + MARKET
+FEATURES = TECH + INSIDER + EARN + INDUSTRY + MARKET
+FIRST_BUY_GAP = 365          # an insider who had not bought for a year: buying is a decision, not a routine
+INSIDER_HISTORY_DAYS = 90 + FIRST_BUY_GAP
 
 LABELS_HE = {
     "mom_6_1": "מומנטום חצי שנה", "rs_63": "חוזק מול S&P 500", "ret_21": "תשואת החודש האחרון",
@@ -28,6 +32,9 @@ LABELS_HE = {
     "ins_net_sell": "מכירות כבדות של מנהלים", "earn_recent": "דוח רבעוני לאחרונה",
     "earn_surprise": "הפתעה בדוח הרבעוני", "earn_reaction": "קפיצה ביום הדוח", "earn_age": "זמן מאז הדוח",
     "mkt_above_200": "שוק במגמה עולה", "mkt_ret_63": "תשואת השוק ב־3 חודשים",
+    "ret_5": "תשואת השבוע האחרון", "max_ret_21": "היום החזק ביותר בחודש",
+    "ins_first_buy": "מנהל שלא קנה שנה קנה עכשיו", "ins_first_value": "סכום קניות של מנהלים שלא קנו שנה",
+    "ind_mom": "מומנטום הענף בחצי שנה", "ind_rs": "חוזק הענף מול S&P 500",
 }
 
 
@@ -46,7 +53,8 @@ def tech_features(r) -> dict:
     close, s50, s200, vr, dv = g("close"), g("sma50"), g("sma200"), g("vol_ratio"), g("dollar_vol20")
     rsi = g("rsi14")
     return {
-        "mom_6_1": g("mom_6_1"), "rs_63": g("rs_63"), "ret_21": g("ret_21"),
+        "mom_6_1": g("mom_6_1"), "rs_63": g("rs_63"), "ret_21": g("ret_21"), "ret_5": g("ret_5"),
+        "max_ret_21": g("max_ret_21"),
         "log_vol_ratio": math.log(vr) if vr and vr > 0 else np.nan,
         "dist_high": g("dist_high"),
         "above_50": float(close > s50) if close == close and s50 == s50 else np.nan,
@@ -61,10 +69,11 @@ def tech_features(r) -> dict:
 def tech_frame(f: dict[str, pd.DataFrame], t) -> pd.DataFrame:
     """Vectorised technical features for all tickers at date t (same formulas as tech_features)."""
     g = {k: f[k].loc[t] for k in ("close", "sma50", "sma200", "vol_ratio", "dollar_vol20", "rsi14", "mom_6_1", "rs_63",
-                                   "ret_21", "dist_high", "squeeze", "atr_pct")}
+                                   "ret_21", "ret_5", "max_ret_21", "dist_high", "squeeze", "atr_pct")}
     with np.errstate(divide="ignore", invalid="ignore"):
         out = pd.DataFrame({
-            "mom_6_1": g["mom_6_1"], "rs_63": g["rs_63"], "ret_21": g["ret_21"],
+            "mom_6_1": g["mom_6_1"], "rs_63": g["rs_63"], "ret_21": g["ret_21"], "ret_5": g["ret_5"],
+            "max_ret_21": g["max_ret_21"],
             "log_vol_ratio": np.log(g["vol_ratio"].where(g["vol_ratio"] > 0)),
             "dist_high": g["dist_high"],
             "above_50": (g["close"] > g["sma50"]).astype(float).where(g["sma50"].notna()),
@@ -93,10 +102,17 @@ def _day(d) -> int | None:
         return None
 
 
+def _bools(s: pd.Series) -> pd.Series:
+    """True/False column where missing means False (no pandas downcasting warnings)."""
+    return s.map(lambda x: bool(x) if x is not None and x == x else False).astype(bool)
+
+
 class InsiderArrays:
     """One company's open-market insider trades as sorted arrays (fast windows for many dates)."""
 
-    def __init__(self, rows):
+    def __init__(self, rows, history_start: int | None = None):
+        """history_start: first day (ordinal) the trade history covers; a buy is 'first in a year' only when a
+        full year before it is covered (otherwise we cannot know)."""
         df = pd.DataFrame(list(rows) if not isinstance(rows, pd.DataFrame) else rows)
         if df.empty:
             self.day = np.array([], dtype=int)
@@ -111,16 +127,16 @@ class InsiderArrays:
         df, self.day = df.iloc[order].reset_index(drop=True), day[order]
         code = df["code"].astype(str).str.strip()
         ad = df["ad"].astype(str).str.strip() if "ad" in df else pd.Series(["A"] * len(df))
-        ten = df["is_ten_pct"].fillna(False).astype(bool) if "is_ten_pct" in df else pd.Series([False] * len(df))
-        off = df["is_officer"].fillna(False).astype(bool) if "is_officer" in df else pd.Series([False] * len(df))
-        dire = df["is_director"].fillna(False).astype(bool) if "is_director" in df else pd.Series([False] * len(df))
+        ten = _bools(df["is_ten_pct"]) if "is_ten_pct" in df else pd.Series([False] * len(df))
+        off = _bools(df["is_officer"]) if "is_officer" in df else pd.Series([False] * len(df))
+        dire = _bools(df["is_director"]) if "is_director" in df else pd.Series([False] * len(df))
         fund_only = (ten & ~off & ~dire).to_numpy()   # 10% holders that are not insiders (often funds)
         value = (pd.to_numeric(df["shares"], errors="coerce").fillna(0) * pd.to_numeric(df["price"], errors="coerce").fillna(0)).to_numpy()
-        planned = df["planned"].fillna(False).astype(bool).to_numpy() if "planned" in df else np.zeros(len(df), bool)
+        planned = _bools(df["planned"]).to_numpy() if "planned" in df else np.zeros(len(df), bool)
         self.is_buy = ((code == "P") & (ad != "D")).to_numpy() & ~fund_only
         self.is_sell = ((code == "S") & (ad != "A")).to_numpy() & ~planned
         self.value = value
-        self.top = df["top_exec"].fillna(False).astype(bool).to_numpy() if "top_exec" in df else np.zeros(len(df), bool)
+        self.top = _bools(df["top_exec"]).to_numpy() if "top_exec" in df else np.zeros(len(df), bool)
         owners = df["owner"].astype(str).fillna("") if "owner" in df else pd.Series([""] * len(df))
         self.owner = pd.factorize(owners)[0]
         shares = pd.to_numeric(df["shares"], errors="coerce").to_numpy(dtype=float)
@@ -130,10 +146,30 @@ class InsiderArrays:
         with np.errstate(divide="ignore", invalid="ignore"):
             incr = np.where(before > 0, shares / before, np.where(after > 0, 2.0, np.nan))
         self.incr = np.clip(incr, 0, 2.0)
+        # first buy in a year by this insider (Cohen, Malloy & Pomorski: non-routine insiders carry the information)
+        names = owners.str.upper().str.replace(r"[^A-Z0-9]+", " ", regex=True).str.strip().to_numpy()
+        start = history_start if history_start is not None else (int(self.day[0]) if self.day.size else 0)
+        last_buy: dict[str, int] = {}
+        first = np.zeros(len(df), bool)
+        i = 0
+        while i < len(df):  # rows of the same day are judged together, before that day updates the history
+            j = i
+            while j < len(df) and self.day[j] == self.day[i]:
+                j += 1
+            d = int(self.day[i])
+            for k in range(i, j):
+                if self.is_buy[k]:
+                    prev = last_buy.get(names[k])
+                    first[k] = (d - prev > FIRST_BUY_GAP) if prev is not None else (d - start >= FIRST_BUY_GAP)
+            for k in range(i, j):
+                if self.is_buy[k]:
+                    last_buy[names[k]] = d
+            i = j
+        self.first = first
 
     def at(self, day: int, window: int = 90) -> dict:
         out = {"ins_buy": 0.0, "ins_log_value": 0.0, "ins_n_buyers": 0.0, "ins_top_exec": 0.0,
-               "ins_hold_incr": 0.0, "ins_net_sell": 0.0}
+               "ins_hold_incr": 0.0, "ins_net_sell": 0.0, "ins_first_buy": 0.0, "ins_first_value": 0.0}
         if self.day.size == 0:
             return out
         lo, hi = np.searchsorted(self.day, day - window, "right"), np.searchsorted(self.day, day, "right")
@@ -151,6 +187,11 @@ class InsiderArrays:
             inc = self.incr[lo:hi][b]
             inc = inc[~np.isnan(inc)]
             out["ins_hold_incr"] = float(np.median(inc)) if inc.size else 0.0
+            fb = b & self.first[lo:hi]
+            fv = float(self.value[lo:hi][fb].sum())
+            if fv > 0:
+                out["ins_first_buy"] = 1.0
+                out["ins_first_value"] = math.log10(1 + fv / 1e4)
         n_sellers = len(set(self.owner[lo:hi][s]))
         if sv > 1e6 and sv > 3 * bv and n_sellers >= 2:
             out["ins_net_sell"] = 1.0
@@ -226,6 +267,55 @@ def earnings_at(events: pd.DataFrame | None, close: pd.Series, spy: pd.Series | 
     return {k: float(v[0]) for k, v in m.items()}
 
 
+# ------------------------------------------------------------------ industry
+class IndustryPeers:
+    """Industry momentum (Moskowitz & Grinblatt): how the stock's industry did, from the SEC industry code (SIC).
+    Peers are a fixed list of stocks (saved with the model) so training and the daily scan use the same groups:
+    the 3-digit SIC group when it has 6+ members, otherwise the 2-digit group."""
+
+    def __init__(self, sic_map: dict | None):
+        self.sic = {}
+        for t, s in (sic_map or {}).items():
+            s = str(s or "").strip()
+            if s.isdigit() and len(s) >= 2:
+                self.sic[t] = s.zfill(4)
+        self.counts3: dict[str, int] = {}
+        for s in self.sic.values():
+            self.counts3[s[:3]] = self.counts3.get(s[:3], 0) + 1
+        self.key = {t: self.key_for(s) for t, s in self.sic.items()}
+
+    def key_for(self, sic) -> str | None:
+        s = str(sic or "").strip()
+        if not s.isdigit() or len(s) < 2:
+            return None
+        s = s.zfill(4)
+        return s[:3] if self.counts3.get(s[:3], 0) >= 6 else s[:2]
+
+    def frame(self, mom: pd.Series, rs: pd.Series, eligible: pd.Series, targets: dict) -> pd.DataFrame:
+        """targets: {ticker: sic}. Peers' average (leaving the stock itself out) of 6-month momentum and 3-month
+        strength vs the S&P 500 on one day. NaN when fewer than 3 peers."""
+        ok = eligible.reindex(mom.index, fill_value=False).astype(bool) & mom.notna() & rs.notna()
+        peers = [t for t in mom.index[ok] if t in self.key and self.key[t]]
+        sums: dict[str, list] = {}
+        for t in peers:
+            a = sums.setdefault(self.key[t], [0.0, 0.0, 0])
+            a[0] += float(mom[t]); a[1] += float(rs[t]); a[2] += 1
+        peer_set = set(peers)
+        rows = {}
+        for t, sic in targets.items():
+            k = self.key.get(t) or self.key_for(sic)
+            a = sums.get(k) if k else None
+            v = (np.nan, np.nan)
+            if a:
+                sm, sr, n = a
+                if t in peer_set:
+                    sm, sr, n = sm - float(mom[t]), sr - float(rs[t]), n - 1
+                if n >= 3:
+                    v = (sm / n, sr / n)
+            rows[t] = v
+        return pd.DataFrame.from_dict(rows, orient="index", columns=INDUSTRY)
+
+
 # ------------------------------------------------------------------ market
 def market_at(spy: pd.Series | None, t_pos: int) -> dict:
     if spy is None or t_pos < 200:
@@ -237,10 +327,14 @@ def market_at(spy: pd.Series | None, t_pos: int) -> dict:
 
 
 def live_features(tech: dict, insider_rows: list[dict], events: pd.DataFrame | None, close: pd.Series,
-                  spy: pd.Series | None, asof: date) -> dict:
-    """All model features for one stock today (same definitions as in training)."""
+                  spy: pd.Series | None, asof: date, industry: dict | None = None,
+                  insider_since: date | None = None) -> dict:
+    """All model features for one stock today (same definitions as in training).
+    insider_since: first day the insider rows cover (for 'first buy in a year')."""
     feats = tech_features(tech)
-    feats.update(InsiderArrays(insider_rows).at(asof.toordinal()))
+    start = insider_since.toordinal() if insider_since else asof.toordinal() - INSIDER_HISTORY_DAYS
+    feats.update(InsiderArrays(insider_rows, history_start=start).at(asof.toordinal()))
+    feats.update(industry or {k: np.nan for k in INDUSTRY})
     close = close.dropna()
     spy_full = spy.dropna() if spy is not None else None
     spy_al = spy_full.reindex(close.index).ffill() if spy_full is not None else None

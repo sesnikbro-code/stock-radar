@@ -22,8 +22,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .features import EARN, FEATURES, INSIDER, LABELS_HE, InsiderArrays, earnings_matrix, market_at, tech_frame
-from .model import ProbModel, Transform, auc, build_meta, fit_logistic, logit, model_spec, sigmoid
+from .features import (EARN, FEATURES, INDUSTRY, INSIDER, LABELS_HE, IndustryPeers, InsiderArrays, earnings_matrix,
+                       market_at, tech_frame)
+from .journal import spearman
+from .model import (GBM, KIND_HE, ProbModel, Transform, auc, build_meta, fit_logistic, fit_ridge, logit, model_spec,
+                    sigmoid)
 from .signals.technical import compute_panel_features, eligibility, scores_at
 from .sources import get_sources
 
@@ -70,7 +73,7 @@ def _sample(tickers: list[str], max_n: int) -> list[str]:
 
 def simulate_trades(O: np.ndarray, H: np.ndarray, L: np.ndarray, C: np.ndarray, atr: np.ndarray, positions,
                     window: int, stop_atr: float, target_r: float | None = None, target_pct: float | None = None,
-                    cost: float = 0.002, spy_open: np.ndarray | None = None,
+                    cost: float | np.ndarray = 0.002, spy_open: np.ndarray | None = None,
                     spy_close: np.ndarray | None = None) -> dict[str, np.ndarray]:
     """Replays the app's trading plan for every stock on every snapshot day (arrays: snapshots x stocks).
 
@@ -80,7 +83,7 @@ def simulate_trades(O: np.ndarray, H: np.ndarray, L: np.ndarray, C: np.ndarray, 
     Returns y (1 = target first), ret (after costs), r (result in multiples of the risk), days,
     kind (1 target, -1 stop, 0 time) and spy (S&P 500 over the same days). NaN = cannot be judged."""
     P, N = len(positions), O.shape[1]
-    out = {k: np.full((P, N), np.nan) for k in ("y", "ret", "r", "days", "kind", "spy")}
+    out = {k: np.full((P, N), np.nan) for k in ("y", "ret", "r", "days", "kind", "spy", "cost")}
     cols = np.arange(N)
     with np.errstate(invalid="ignore", divide="ignore"):
         for i, p in enumerate(positions):
@@ -104,9 +107,10 @@ def simulate_trades(O: np.ndarray, H: np.ndarray, L: np.ndarray, C: np.ndarray, 
             last = pd.DataFrame(C[sl]).ffill().to_numpy()[-1]
             exit_px = np.where(hit_t, px_t, np.where(hit_s, px_s, last))
             held = np.where(hit_t, ftc + 1, np.where(hit_s, fsc + 1, window)).astype(int)
-            ret = exit_px / e - 1 - cost
+            c = cost[i] if np.ndim(cost) == 2 else cost   # one cost per stock (spread depends on liquidity)
+            ret = exit_px / e - 1 - c
             bad = np.isnan(e) | np.isnan(a) | ~(a > 0) | ~(stop > 0) | np.isnan(exit_px)
-            row = {"y": hit_t.astype(float), "ret": ret, "r": ret * e / risk, "days": held.astype(float),
+            row = {"cost": np.broadcast_to(np.asarray(c, dtype=float), ret.shape), "y": hit_t.astype(float), "ret": ret, "r": ret * e / risk, "days": held.astype(float),
                    "kind": np.where(hit_t, 1.0, np.where(hit_s, -1.0, 0.0))}
             if spy_open is not None and spy_close is not None:
                 row["spy"] = spy_close[np.minimum(p + held, len(spy_close) - 1)] / spy_open[p + 1] - 1
@@ -115,6 +119,15 @@ def simulate_trades(O: np.ndarray, H: np.ndarray, L: np.ndarray, C: np.ndarray, 
                 v[bad] = np.nan
                 out[k][i] = v
     return out
+
+
+def trade_costs(dollar_volume: np.ndarray, base: float) -> np.ndarray:
+    """Round-trip cost per trade: commissions/slippage (base) plus a bid-ask spread that grows as liquidity falls,
+    from 0 for stocks trading $50M+ a day to 0.5% at $5M a day (and more below)."""
+    with np.errstate(divide="ignore", invalid="ignore"):
+        lv = np.log10(np.where(dollar_volume > 0, dollar_volume, np.nan))
+    extra = np.clip(0.005 * (np.log10(5e7) - lv), 0, 0.01)
+    return base + np.nan_to_num(extra, nan=0.005)
 
 
 def trade_stats(df: pd.DataFrame) -> dict | None:
@@ -127,6 +140,9 @@ def trade_stats(df: pd.DataFrame) -> dict | None:
            "med": float(np.nanmedian(ret)), "win": float(np.nanmean(ret > 0)),
            "stop": float((df["kind"] == -1).mean()), "target": float((df["kind"] == 1).mean()),
            "r": float(df["r"].mean()), "days": float(df["days"].mean())}
+    if "cost" in df:  # sensitivity: what if trading costs were twice as high?
+        out["cost"] = float(df["cost"].mean())
+        out["ret_2x_cost"] = float(np.nanmean(ret - df["cost"].to_numpy(dtype=float)))
     if np.isfinite(spy).any():
         out["spy"] = float(np.nanmean(spy))
         out["excess"] = float(np.nanmean(ret - spy))
@@ -181,6 +197,7 @@ def _events_for(src, cols, meta_u, since, cfg, progress_every=100):
         except Exception as e:  # noqa: BLE001
             log.debug("earnings events failed %s: %s", t, e)
             ev = None
+        sic = src.company_sic(cik, http) if cik and hasattr(src, "company_sic") else None
         if use_y:
             state["yahoo_tries"] += 1
             if ev is not None and len(ev) and ev["surprise"].notna().any():
@@ -188,12 +205,13 @@ def _events_for(src, cols, meta_u, since, cfg, progress_every=100):
         state["done"] += 1
         if state["done"] % progress_every == 0:
             log.info("תאריכי דוחות רבעוניים: %d/%d מניות", state["done"], len(cols))
-        return t, ev
+        return t, ev, sic
 
     workers = int(cfg.get("workers", 4))
     with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
-        res = dict(ex.map(one, list(enumerate(cols))))
-    return res, state
+        out = list(ex.map(one, list(enumerate(cols))))
+    state["sic"] = {t: s for t, _e, s in out if s}
+    return {t: e for t, e, _s in out}, state
 
 
 def train_model(settings, demo: bool = False, out_path: Path | None = None) -> dict:
@@ -224,10 +242,12 @@ def train_model(settings, demo: bool = False, out_path: Path | None = None) -> d
 
     # 2. insider history (SEC) -------------------------------------------------------
     ciks = {int(meta_u[t]["cik"]) for t in cols if (meta_u.get(t) or {}).get("cik")}
-    log.info("מוריד את כל דיווחי המנהלים מ־SEC ל־%d שנים (קובץ לכל רבעון)...", years)
-    ins = src.insider_history(years, ciks, lambda q, n: log.info("SEC רבעון %s: %d עסקאות רלוונטיות", q, n))
+    # one extra year, so 'first buy in a year' is known from the first training day on
+    log.info("מוריד את כל דיווחי המנהלים מ־SEC ל־%d שנים (קובץ לכל רבעון)...", years + 1)
+    ins = src.insider_history(years + 1, ciks, lambda q, n: log.info("SEC רבעון %s: %d עסקאות רלוונטיות", q, n))
     have_ins = ins is not None and not ins.empty
-    by_cik = {int(c): InsiderArrays(g) for c, g in ins.groupby("cik")} if have_ins else {}
+    ins_start = min(d for d in ins["filing_date"] if d is not None).toordinal() if have_ins else None
+    by_cik = {int(c): InsiderArrays(g, history_start=ins_start) for c, g in ins.groupby("cik")} if have_ins else {}
     last_ins = max(ins["filing_date"]) if have_ins else None
     if not have_ins:
         log.warning("לא התקבלו נתוני מנהלים היסטוריים מ־SEC – המודל יתאמן בלעדיהם")
@@ -253,24 +273,30 @@ def train_model(settings, demo: bool = False, out_path: Path | None = None) -> d
     atr = f["atr14"][cols].to_numpy(dtype=float)
     spy_o = panel["Open"]["SPY"].ffill().to_numpy(dtype=float) if spy is not None else None
     spy_c = spy.ffill().to_numpy(dtype=float) if spy is not None else None
-    tr_ = simulate_trades(O, H, L, C[cols].to_numpy(dtype=float), atr, positions, W, k, target_r, target_pct, cost,
+    cost_m = trade_costs(f["dollar_vol20"][cols].to_numpy(dtype=float)[positions], cost)
+    tr_ = simulate_trades(O, H, L, C[cols].to_numpy(dtype=float), atr, positions, W, k, target_r, target_pct, cost_m,
                           spy_o, spy_c)
     Y = tr_["y"]
     weights = settings.get("weights")
+    peers = IndustryPeers(ystate.get("sic"))
+    targets = {t: peers.sic.get(t) for t in cols}
     parts = []
     for i, p in enumerate(positions):
         t = dates[p]
-        ok = elig.loc[t, cols].fillna(False).to_numpy(bool) & ~np.isnan(Y[i])
+        ok = elig.loc[t, cols].to_numpy(dtype=bool) & ~np.isnan(Y[i])
         if not ok.any():
             continue
         tf = tech_frame(f, t).reindex(cols)[ok]
         sc = scores_at(f, t, elig.loc[t], weights)
         tf["tech_score"] = sc["tech_score"].reindex(tf.index) if "tech_score" in sc else np.nan
         tf["pos"] = p
-        for kk in ("y", "ret", "r", "days", "kind", "spy"):
+        for kk in ("y", "ret", "r", "days", "kind", "spy", "cost"):
             tf[kk] = tr_[kk][i][ok]
         for kk, v in (market_at(spy, p) if spy is not None else {}).items():
             tf[kk] = v
+        ind = peers.frame(f["mom_6_1"].loc[t], f["rs_63"].loc[t], elig.loc[t], {k2: targets[k2] for k2 in tf.index})
+        for kk in INDUSTRY:
+            tf[kk] = ind[kk].reindex(tf.index).to_numpy()
         parts.append(tf)
     if not parts:
         raise RuntimeError("אף מניה לא עברה את מסנני הנזילות בתקופת האימון.")
@@ -308,32 +334,66 @@ def train_model(settings, demo: bool = False, out_path: Path | None = None) -> d
              "עסקה ממוצעת %+.2f%%", len(D), D["ticker"].nunique(), len(positions), 100 * y.mean(), goal,
              100 * float(D["ret"].mean()))
 
-    # 6. walk-forward test ------------------------------------------------------------------
+    # money target for the money models: the trade's result relative to all stocks on the same day (the model only
+    # has to rank stocks against each other; whether the whole market rises is not its question)
+    ret_c = D["ret"].clip(-0.5, 1.0)
+    D["rx"] = ret_c - ret_c.groupby(D["pos"]).transform("mean")
+    rx = D["rx"].to_numpy(dtype=float)
+
+    # 6. walk-forward test: every candidate model is fitted on older years and scored on later ones -----------
     upos = np.array(sorted(set(pos)))
     blocks = np.array_split(upos, int(cfg.get("folds", 5)))
-    oos = np.full(len(D), np.nan)
+    test_blocks = blocks[1:]
+    half = max(1, len(test_blocks) // 2)
+    sel_pos = np.concatenate(test_blocks[:half])       # period A: used to choose the model
+    fin_pos = np.concatenate(test_blocks[half:])       # period B: final check, used for nothing else
     lam_k = float(cfg.get("l2", 1e-3))
-    for b in blocks[1:]:
+    kinds = [k2 for k2 in cfg.get("candidates", ["hit", "lin", "gbm"]) if k2 in KIND_HE]
+    oos = {k2: np.full(len(D), np.nan) for k2 in kinds}
+    for b in test_blocks:
         tr = pos + W + 1 < b[0]                       # 3-month gap: training outcomes end before the test starts
         te = np.isin(pos, b)
         if tr.sum() < 2000 or y[tr].sum() < 50:
             continue
-        tfm = Transform.fit(X[tr], FEATURES)
-        w = fit_logistic(tfm(X[tr]), y[tr], lam=lam_k * tr.sum())
-        oos[te] = sigmoid(tfm(X[te]) @ w)
-    m = ~np.isnan(oos)
+        for k2 in kinds:
+            fit = _fit_candidate(k2, X[tr], y[tr], rx[tr], lam_k)
+            oos[k2][te] = _predict_candidate(k2, fit, X[te])
+    m = ~np.isnan(oos[kinds[0]])
     if m.sum() < 1000:
         raise RuntimeError("אין מספיק נתונים לבדיקה הוגנת של המודל.")
-    cal = fit_logistic(np.column_stack([np.ones(m.sum()), logit(oos[m])]), y[m], lam=0.0)
-    p_cal = sigmoid(cal[0] + cal[1] * logit(oos[m]))
+    if "hit" in oos:  # the hit model's scores become calibrated probabilities (fitted on its own test scores)
+        cal = fit_logistic(np.column_stack([np.ones(m.sum()), logit(oos["hit"][m])]), y[m], lam=0.0)
+        oos["hit"][m] = sigmoid(cal[0] + cal[1] * logit(oos["hit"][m]))
+    else:
+        cal = np.array([0.0, 1.0])
     T = D[m].copy()
-    T["p"] = p_cal
-    base = float(T["y"].mean())
-    top_rate, top_cnt = _top_rate(T, "p", top_n)
-    tech_rate, _ = _top_rate(T.dropna(subset=["tech_score"]), "tech_score", top_n)
-    money = {"model": trade_stats(_top(T, "p", top_n)),
-             "tech": trade_stats(_top(T.dropna(subset=["tech_score"]), "tech_score", top_n)),
-             "all": trade_stats(T)}
+    for k2 in kinds:
+        T["s_" + k2] = oos[k2][m]
+    A, B = T[T["pos"].isin(sel_pos)], T[T["pos"].isin(fin_pos)]
+    tech_ok = lambda df: df.dropna(subset=["tech_score"])  # noqa: E731
+    base_stats = {"sel": {"all": trade_stats(A), "tech": trade_stats(_top(tech_ok(A), "tech_score", top_n))},
+                  "fin": {"all": trade_stats(B), "tech": trade_stats(_top(tech_ok(B), "tech_score", top_n))}}
+    candidates = []
+    for k2 in kinds:
+        sa, sb = trade_stats(_top(A, "s_" + k2, top_n)) or {}, trade_stats(_top(B, "s_" + k2, top_n)) or {}
+        candidates.append({"kind": k2, "label": KIND_HE[k2], "sel": sa, "fin": sb,
+                           "ic": spearman(T["s_" + k2], T["ret"])})
+        log.info("%s: תקופת הבחירה %+.2f%% לעסקה, בדיקה סופית %+.2f%% (כל המניות %+.2f%% / %+.2f%%)", KIND_HE[k2],
+                 100 * (sa.get("ret") or 0), 100 * (sb.get("ret") or 0),
+                 100 * (base_stats["sel"]["all"] or {}).get("ret", 0), 100 * (base_stats["fin"]["all"] or {}).get("ret", 0))
+    chosen = max(candidates, key=lambda c: (c["sel"].get("ret") if c["sel"].get("ret") is not None else -9))
+    kind = chosen["kind"]
+    sc = "s_" + kind
+    T["p"] = T[sc]
+    sel_all, fin_all = base_stats["sel"]["all"] or {}, base_stats["fin"]["all"] or {}
+    edge_sel = (chosen["sel"].get("ret") or 0) - (sel_all.get("ret") or 0)
+    edge_fin = (chosen["fin"].get("ret") or 0) - (fin_all.get("ret") or 0)
+    passed = bool(edge_sel > 0 and edge_fin > 0 and (chosen["fin"].get("ret") or 0) > 0)
+    quality = float(min(1.0, max(0.25, edge_fin / 0.01))) if passed else 0.0
+
+    Bp = T[T["pos"].isin(fin_pos)]
+    base = float(Bp["y"].mean())
+    top_rate, top_cnt = _top_rate(Bp, "p", top_n)
     q = pd.qcut(T["p"].rank(method="first"), 10, labels=False)
     deciles = []
     for i in range(10):
@@ -349,46 +409,65 @@ def train_model(settings, demo: bool = False, out_path: Path | None = None) -> d
         al = trade_stats(g) or {}
         by_year.append({"year": int(yr), "top": tp.get("hit"), "base": al.get("hit"), "top_ret": tp.get("ret"),
                         "base_ret": al.get("ret"), "spy": al.get("spy"), "n": int(len(g))})
-    a = auc(T["y"].to_numpy(), T["p"].to_numpy())
-    top_lift = (top_rate / base) if top_rate is not None and base else None
-    mm, ma = money["model"] or {}, money["all"] or {}
-    money_ok = mm.get("ret") is not None and ma.get("ret") is not None and mm["ret"] > ma["ret"] and mm["ret"] > 0
-    auc_q = max(0.0, min(1.0, ((a or 0.5) - 0.52) / 0.06))
-    passed = bool(auc_q > 0 and money_ok and (top_lift or 0) >= 1.1)
-    quality = auc_q if passed else 0.0
+    a = auc(Bp["y"].to_numpy(), Bp["p"].to_numpy())
+    pd_dates = lambda ps: (dates[int(min(ps))].date(), dates[int(max(ps))].date())  # noqa: E731
+    sel_d, fin_d = pd_dates(sel_pos), pd_dates(fin_pos)
     validation = {
-        "auc": a, "base": base, "top_n": top_n, "top_rate": top_rate, "top_count": top_cnt, "top_lift": top_lift,
-        "tech_top_rate": tech_rate, "n_test": int(m.sum()), "money": money, "passed": passed,
-        "test_start": dates[int(T["pos"].min())].date(), "test_end": dates[int(T["pos"].max())].date(),
+        "kind": kind, "auc": a, "base": base, "top_n": top_n, "top_rate": top_rate, "top_count": top_cnt,
+        "top_lift": (top_rate / base) if top_rate is not None and base else None,
+        "tech_top_rate": (base_stats["fin"]["tech"] or {}).get("hit"), "n_test": int(len(Bp)),
+        "money": {"model": chosen["fin"], "tech": base_stats["fin"]["tech"], "all": base_stats["fin"]["all"]},
+        "money_sel": {"model": chosen["sel"], "tech": base_stats["sel"]["tech"], "all": base_stats["sel"]["all"]},
+        "money_all": trade_stats(T), "candidates": candidates, "edge_sel": edge_sel, "edge_fin": edge_fin,
+        "passed": passed, "sel_start": sel_d[0], "sel_end": sel_d[1], "test_start": fin_d[0], "test_end": fin_d[1],
         "deciles": deciles, "by_year": by_year,
     }
-    log.info("בדיקה על תקופה שהמודל לא ראה: AUC %.3f. %d המובילות: הגיעו ליעד %.1f%% (ממוצע %.1f%%), "
-             "עסקה ממוצעת %+.2f%% מול %+.2f%% לכל המניות. %s", a or 0, top_n, 100 * (top_rate or 0), 100 * base,
-             100 * (mm.get("ret") or 0), 100 * (ma.get("ret") or 0), "עבר את הבדיקה" if passed else "לא עבר את הבדיקה")
+    log.info("נבחר: %s. בדיקה סופית (%s עד %s): %d המובילות %+.2f%% לעסקה מול %+.2f%% לכל המניות. %s",
+             KIND_HE[kind], fin_d[0], fin_d[1], top_n, 100 * (chosen["fin"].get("ret") or 0),
+             100 * (fin_all.get("ret") or 0), "עבר את הבדיקה" if passed else "לא עבר את הבדיקה")
 
-    # 7. final model on everything ------------------------------------------------------------
-    tff = Transform.fit(X, FEATURES)
-    w = fit_logistic(tff(X), y, lam=lam_k * len(y))
+    # 7. the chosen model, fitted on everything ------------------------------------------------------------
+    final = _fit_candidate(kind, X, y, rx, lam_k)
     n_tk = D["ticker"].nunique()
     coverage = {
         "insider": bool(have_ins), "insider_rows": float((D["ins_buy"] == 1).mean()) if have_ins else 0.0,
+        "first_buy_rows": float((D["ins_first_buy"] == 1).mean()) if have_ins else 0.0,
+        "industry_rows": float(D["ind_mom"].notna().mean()),
         "earnings_tickers": float(sum(1 for t in cols if events.get(t) is not None) / max(1, len(cols))),
         "surprise_rows": float(D["earn_surprise"].notna().mean() * (D["earn_recent"] == 1).mean()),
         "yahoo_tries": ystate["yahoo_tries"], "yahoo_hits": ystate["yahoo_hits"],
     }
     meta = build_meta(
-        FEATURES, tff, w, demo=demo, years=years, spec=model_spec(settings), target_mode="pct" if target_pct else "r",
+        FEATURES, final.get("tf"), final.get("w"), kind=kind, gbm=final["gbm"].to_json() if "gbm" in final else None,
+        demo=demo, years=years, spec=model_spec(settings), target_mode="pct" if target_pct else "r",
         target=target_pct, target_r=target_r, horizon=W, stop_atr=k, cost=cost, quality=quality,
-        base_rate=base, base_all=float(y.mean()), n_rows=len(D), n_tickers=n_tk, n_dates=len(positions),
-        period={"start": dates[positions[0]].date(), "end": dates[positions[-1]].date()},
+        base_rate=float(T["y"].mean()), base_all=float(y.mean()), n_rows=len(D), n_tickers=n_tk,
+        n_dates=len(positions), period={"start": dates[positions[0]].date(), "end": dates[positions[-1]].date()},
         calibration={"a": float(cal[0]), "b": float(cal[1])}, validation=validation,
         what_worked=_what_worked(D, max(100, len(D) // 400)), coverage=coverage,
-        labels={k2: LABELS_HE[k2] for k2 in FEATURES},
+        labels={k2: LABELS_HE[k2] for k2 in FEATURES}, industry_map=peers.sic,
     )
     model = ProbModel(meta)
     if out_path:
         model.save(Path(out_path))
     return meta
+
+
+def _fit_candidate(kind: str, X: np.ndarray, y: np.ndarray, rx: np.ndarray, lam_k: float) -> dict:
+    if kind == "hit":
+        tfm = Transform.fit(X, FEATURES)
+        return {"tf": tfm, "w": fit_logistic(tfm(X), y, lam=lam_k * len(y))}
+    if kind == "lin":
+        tfm = Transform.fit(X, FEATURES)
+        return {"tf": tfm, "w": fit_ridge(tfm(X), rx, lam=0.005 * len(rx))}
+    return {"gbm": GBM(min_leaf=max(200, len(rx) // 150)).fit(X, rx)}
+
+
+def _predict_candidate(kind: str, fit: dict, X: np.ndarray) -> np.ndarray:
+    if kind == "gbm":
+        return fit["gbm"].predict(X)
+    z = fit["tf"](X) @ fit["w"]
+    return sigmoid(z) if kind == "hit" else z
 
 
 def model_age_days(path: Path) -> float | None:

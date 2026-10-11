@@ -8,7 +8,7 @@ import pandas as pd
 from ..util import SignalResult, clip, num, pct
 
 FEATURES = ["close", "ret_5", "ret_21", "ret_63", "mom_6_1", "rs_63", "sma50", "sma200", "dist_high",
-            "vol_ratio", "dollar_vol20", "atr14", "atr_pct", "rsi14", "squeeze", "history"]
+            "vol_ratio", "dollar_vol20", "atr14", "atr_pct", "rsi14", "squeeze", "max_ret_21", "history"]
 
 
 def compute_panel_features(panel: dict[str, pd.DataFrame], spy_ticker: str = "SPY") -> dict[str, pd.DataFrame]:
@@ -40,6 +40,7 @@ def compute_panel_features(panel: dict[str, pd.DataFrame], spy_ticker: str = "SP
     sma20 = c.rolling(20, min_periods=18).mean()
     bbw = 4 * c.rolling(20, min_periods=18).std() / sma20
     f["squeeze"] = bbw / bbw.rolling(126, min_periods=60).min()
+    f["max_ret_21"] = (c / c.shift(1) - 1).rolling(21, min_periods=15).max()  # lottery-like spikes
     f["history"] = c.notna().cumsum()
     for k in list(f):
         f[k] = f[k].replace([np.inf, -np.inf], np.nan)
@@ -60,7 +61,7 @@ def scores_at(f: dict[str, pd.DataFrame], t, eligible: pd.Series, weights: dict,
               exclude: tuple[str, ...] = ("SPY",)) -> pd.DataFrame:
     """Cross-sectional technical scores at date t for eligible tickers."""
     df = pd.DataFrame({k: f[k].loc[t] for k in FEATURES})
-    mask = eligible.reindex(df.index).fillna(False).astype(bool)
+    mask = eligible.reindex(df.index, fill_value=False).astype(bool)
     df = df[mask & ~df.index.isin(exclude)]
     if df.empty:
         return df

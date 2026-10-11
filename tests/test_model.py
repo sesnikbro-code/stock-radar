@@ -255,6 +255,18 @@ class TestModel(unittest.TestCase):
         self.assertAlmostEqual(st["win"], 0.4)
         self.assertAlmostEqual(st["excess"], st["ret"] - 0.01)
 
+    def test_trade_costs(self):
+        from radar.train import trade_costs
+
+        c = trade_costs(np.array([1e8, 5e7, 5e6, np.nan]), 0.002)
+        np.testing.assert_allclose(c, [0.002, 0.002, 0.007, 0.007])
+        O = np.full((8, 2), 10.0)
+        t = simulate_trades(O, O + 0.5, O - 0.5, O, np.ones((8, 2)), [0], 5, 2.5, target_r=3.0,
+                            cost=np.array([[0.002, 0.007]]))
+        np.testing.assert_allclose(t["ret"][0], [-0.002, -0.007])
+        st = trade_stats(pd.DataFrame({k: v[0] for k, v in t.items()}))
+        self.assertAlmostEqual(st["ret_2x_cost"], -0.009)
+
     def test_plan_target(self):
         from radar.scoring import position_plan
 
@@ -298,15 +310,20 @@ class TestTrainEndToEnd(unittest.TestCase):
             meta = train_model(s, demo=True, out_path=path)
             v = meta["validation"]
             self.assertGreater(meta["n_rows"], 5000)
-            self.assertGreater(v["auc"], 0.53)               # the demo market has real (synthetic) structure
-            self.assertGreater(v["top_rate"], v["base"])
             self.assertEqual(len(v["deciles"]), 10)
+            # tournament: three candidates, chosen on period A, judged on the untouched period B
+            self.assertEqual({c["kind"] for c in v["candidates"]}, {"hit", "lin", "gbm"})
+            self.assertLess(str(v["sel_end"]), str(v["test_start"]))
+            best_a = max(v["candidates"], key=lambda c: c["sel"]["ret"])
+            self.assertEqual(meta["kind"], best_a["kind"])
+            self.assertEqual(v["money"]["model"], best_a["fin"])
+            self.assertGreater(meta["coverage"]["industry_rows"], 0.5)
             self.assertTrue(all(d["p_lo"] <= d["p_hi"] and d["ret"] is not None for d in v["deciles"]))
             money = v["money"]
             self.assertGreater(money["model"]["ret"], money["all"]["ret"])
             self.assertIn("spy", money["all"])
             self.assertTrue(v["passed"])
-            self.assertEqual(meta["spec"], "v2:r3:atr2.5:h63")
+            self.assertEqual(meta["spec"], "v3:r3:atr2.5:h63")
             self.assertEqual(meta["target_mode"], "r")
             self.assertTrue(all("ret" in w for w in meta["what_worked"]))
             self.assertTrue(meta["what_worked"])
@@ -339,6 +356,82 @@ class TestTrainEndToEnd(unittest.TestCase):
             res2 = run_scan(s, demo=True, model_path=Path(d) / "missing.json")
             self.assertTrue(all(r["prob"] is None for r in res2["results"]))
             self.assertEqual(res2["weights"]["model"], 0.0)
+
+
+class TestVersion7(unittest.TestCase):
+    def test_money_target_avoids_the_hit_trap(self):
+        """The failure seen in the real test of version 6: wild stocks reach the target more often but lose more
+        money. A model taught 'did it hit' picks them; a model taught 'how much money' must not."""
+        from radar.features import FEATURES
+        from radar.train import _fit_candidate, _predict_candidate, _top
+
+        rng = np.random.default_rng(3)
+        days, per_day = 160, 250
+        n = days * per_day
+        vol = rng.uniform(0.01, 0.08, n)            # daily volatility
+        q = rng.normal(0, 1, n)                     # a genuinely useful signal (e.g. first-time insider buying)
+        y = (rng.random(n) < np.clip(0.05 + 3.0 * vol + 0.005 * q, 0, 1)).astype(float)
+        ret = 0.02 * q - 1.0 * (vol - 0.045) + rng.normal(0, 0.08, n)
+        X = np.full((n, len(FEATURES)), np.nan)
+        X[:, FEATURES.index("atr_pct")] = vol
+        X[:, FEATURES.index("ind_mom")] = q
+        pos = np.repeat(np.arange(days), per_day)
+        rx = np.clip(ret, -0.5, 1.0)
+        rx = rx - pd.Series(rx).groupby(pos).transform("mean").to_numpy()
+        tr, te = pos < 100, pos >= 100
+        df = pd.DataFrame({"pos": pos[te], "ret": ret[te]})
+        results = {}
+        for kind in ("hit", "lin", "gbm"):
+            fit = _fit_candidate(kind, X[tr], y[tr], rx[tr], 1e-3)
+            df["s"] = _predict_candidate(kind, fit, X[te])
+            results[kind] = float(_top(df, "s", 10)["ret"].mean())
+        avg = float(df["ret"].mean())
+        self.assertLess(results["hit"], avg)                  # the trap: picks the wild losers
+        self.assertGreater(results["lin"], avg + 0.02)        # the money models pick the useful signal
+        self.assertGreater(results["gbm"], avg + 0.02)
+
+    def test_first_time_insider_buy(self):
+        from radar.features import InsiderArrays
+
+        d0 = date(2025, 1, 1)
+        row = lambda days, owner: {"filing_date": d0 + timedelta(days=days), "code": "P", "shares": 1000,  # noqa: E731
+                                   "price": 10, "ad": "A", "owner": owner}
+        rows = [row(400, "ROUTINE ANN"), row(500, "ROUTINE ANN"), row(520, "NEW BOB"), row(800, "Routine Ann")]
+        a = InsiderArrays(rows, history_start=d0.toordinal())
+        self.assertEqual(list(a.first), [True, False, True, False])   # Ann bought 100 days before; Bob never
+        self.assertEqual(a.at((d0 + timedelta(days=530)).toordinal())["ins_first_buy"], 1.0)
+        self.assertEqual(a.at((d0 + timedelta(days=805)).toordinal())["ins_first_buy"], 0.0)  # Ann again: routine
+        # without a year of history before the buy we cannot know: not counted as first
+        b = InsiderArrays([row(100, "X")], history_start=d0.toordinal())
+        self.assertEqual(list(b.first), [False])
+
+    def test_industry_peers(self):
+        from radar.features import IndustryPeers
+
+        sic = {f"A{i}": "3674" for i in range(7)} | {f"B{i}": "2834" for i in range(3)} | {"C0": "2836"}
+        peers = IndustryPeers(sic)
+        self.assertEqual(peers.key["A0"], "367")      # 7 members: its own 3-digit group
+        self.assertEqual(peers.key["B0"], "28")       # small group: falls back to the 2-digit group
+        mom = pd.Series({**{f"A{i}": 0.1 * i for i in range(7)}, "B0": 0.3, "B1": 0.3, "B2": 0.3, "C0": 0.3})
+        rs = mom / 2
+        elig = pd.Series(True, index=mom.index)
+        fr = peers.frame(mom, rs, elig, {"A0": "3674", "B0": "2834", "NEW": "3674"})
+        self.assertAlmostEqual(fr.loc["A0", "ind_mom"], np.mean([0.1 * i for i in range(1, 7)]))  # leaves itself out
+        self.assertAlmostEqual(fr.loc["NEW", "ind_mom"], np.mean([0.1 * i for i in range(7)]))
+        self.assertAlmostEqual(fr.loc["B0", "ind_mom"], 0.3)     # B1, B2, C0 (2-digit group 28)
+        self.assertTrue(np.isnan(peers.frame(mom, rs, elig, {"Z": "9999"}).loc["Z", "ind_mom"]))
+
+    def test_gbm_finds_combinations(self):
+        from radar.model import GBM
+
+        rng = np.random.default_rng(0)
+        X = rng.normal(size=(30000, 5))
+        truth = 0.5 * (X[:, 0] > 0) * (X[:, 1] > 0)           # only together
+        y = truth + rng.normal(0, 1, 30000)
+        g = GBM().fit(X[:20000], y[:20000])
+        self.assertGreater(np.corrcoef(g.predict(X[20000:]), truth[20000:])[0, 1], 0.8)
+        g2 = GBM.from_json(json.loads(json.dumps(g.to_json())))
+        np.testing.assert_allclose(g2.predict(X[20000:25000]), g.predict(X[20000:25000]))
 
 
 class TestPaperPlan(unittest.TestCase):
@@ -385,7 +478,7 @@ class TestCloudScripts(unittest.TestCase):
             (root / "config.yaml").write_text("train:\n  enabled: true\n  retrain_days: 30\nalerts:\n  x: 1\n",
                                               encoding="utf-8")
             spec = self._need(root, "--spec")
-            self.assertTrue(spec.startswith("v2:r3"))
+            self.assertTrue(spec.startswith("v3:r3"))
             now = datetime.now(timezone.utc).isoformat()
             self.assertEqual(self._need(root), "yes")                  # no model yet
             (data / "model_attempt.txt").write_text(f"{date.today().isoformat()} {spec}", encoding="utf-8")

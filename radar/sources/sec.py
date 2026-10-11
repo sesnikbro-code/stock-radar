@@ -228,6 +228,13 @@ def company_filings(http: Http, cik: int, ttl: float = 6 * 3600) -> dict | None:
     return (subs.get("filings") or {}).get("recent") or None
 
 
+def company_sic(http: Http, cik: int, ttl: float = 6 * 3600) -> str | None:
+    """The company's industry code (SIC) from the same cached submissions file."""
+    subs = http.get(SUBMISSIONS_URL.format(cik=cik), as_json=True, ttl=ttl)
+    sic = str((subs or {}).get("sic") or "").strip()
+    return sic if sic.isdigit() else None
+
+
 def _earnings_rows(block: dict, since: str) -> list[str]:
     forms, items, dates = block.get("form", []), block.get("items", []), block.get("filingDate", [])
     out = []

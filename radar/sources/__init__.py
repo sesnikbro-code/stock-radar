@@ -66,12 +66,23 @@ class LiveSources:
         return self.market.details(ticker, price, want_options)
 
     # ---------------------------------------------------------------- insiders
-    def insider(self, cik: int, lookback_days: int) -> list[dict]:
-        return sec.company_form4(self.http, cik, lookback_days)
 
     def filings(self, cik: int) -> dict | None:
         """SEC filing list of one company (for the takeover check and corporate events)."""
         return sec.company_filings(self.http, int(cik))
+
+    def company_sic(self, cik: int | None, http: Http | None = None) -> str | None:
+        """Industry code (SIC) from SEC: same cached file as the insider and earnings checks."""
+        if not cik:
+            return None
+        try:
+            return sec.company_sic(http or self.http, int(cik))
+        except Exception as e:  # noqa: BLE001
+            log.debug("SIC failed %s: %s", cik, e)
+            return None
+
+    def insider(self, cik: int, lookback_days: int, max_filings: int = 40) -> list[dict]:
+        return sec.company_form4(self.http, cik, lookback_days, max_filings)
 
     def insider_history(self, years: int, ciks: set[int] | None = None, log_fn=None):
         """Every open-market insider purchase/sale of the past years (SEC quarterly data sets)."""

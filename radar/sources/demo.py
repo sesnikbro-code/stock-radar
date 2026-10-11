@@ -179,7 +179,7 @@ class DemoSources:
                 "insider_yahoo": None, "options": options}
 
     # ---------------------------------------------------------------- insiders
-    def insider(self, cik, lookback_days):
+    def insider(self, cik, lookback_days, max_filings=40):
         t = self.tickers[cik - 1000]
         rng = np.random.default_rng(cik)
         q, price = self._quality(t), float(self.panel["Close"][t].iloc[self.cut - 1])
@@ -197,6 +197,13 @@ class DemoSources:
                             "transactions": [{"date": self.today - timedelta(days=int(rng.integers(2, 80))),
                                               "code": "S", "shares": 20_000.0, "price": price, "ad": "D"}]})
         return filings
+
+    def company_sic(self, cik, http=None):
+        """Synthetic industry codes: one SIC group per demo industry."""
+        i = (cik or 0) - 1000
+        if not 0 <= i < len(self.tickers):
+            return None
+        return f"{3600 + 10 * (i % len(INDUSTRIES)) + (i % 3)}"
 
     def insider_history(self, years, ciks=None, log_fn=None):
         """Synthetic insider trades over the whole demo history. Buys are more likely while a stock's hidden

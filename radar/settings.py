@@ -127,6 +127,7 @@ DEFAULTS: dict = {
         "horizon_days": 63,         # within 3 months, before the stop (risk.atr_stop_multiple x ATR)
         "cost_pct": 0.2,            # trading costs per round trip, in %
         "folds": 5,
+        "candidates": ["hit", "lin", "gbm"],  # models that compete; the winner is chosen on an earlier period
         "l2": 0.001,
         "earnings_yahoo_max": 800,  # stocks for which EPS surprises are fetched from Yahoo
         "yahoo_minutes": 20,

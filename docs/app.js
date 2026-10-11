@@ -76,7 +76,7 @@
     refresh: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 5v6h-6"/></svg>',
     help: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M9.6 9.4a2.5 2.5 0 0 1 4.9.8c0 1.6-2.5 2.2-2.5 3.7"/><circle cx="12" cy="17.2" r="1" fill="currentColor" stroke="none"/></svg>',
   };
-  const APP_VERSION = 4;  // shown once: what is new in this version
+  const APP_VERSION = 5;  // shown once: what is new in this version
   const RADAR_MARK = '<svg class="radar-mark" viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="14" style="fill:var(--accent-soft)"/><circle cx="16" cy="16" r="14" fill="none" style="stroke:var(--accent)" stroke-width="1.5"/><circle cx="16" cy="16" r="8.5" fill="none" style="stroke:var(--accent)" stroke-width="1" opacity=".55"/><path d="M16 16L16 2A14 14 0 0 1 28.1 9z" style="fill:var(--accent)" opacity=".35"/><path d="M16 16L28.1 9" style="stroke:var(--accent)" stroke-width="1.6" stroke-linecap="round"/><circle cx="21.5" cy="11.5" r="2" style="fill:var(--good)"/></svg>';
 
   // ------------------------------------------------------------------ state
@@ -344,7 +344,7 @@
       return m.passed ? 'מודל הסיכוי עבר את הבדיקה על שנים שלא ראה.' : 'מודל הסיכוי לא עבר את הבדיקה על שנים שלא ראה.';
     }
     const spy = modelSpy(m);
-    return `בבדיקה על שנים שהמודל לא ראה: המובילות שלו ${N(pct(m.top_ret, 1, true))} לעסקה בממוצע, כל המניות ${N(pct(m.all_ret, 1, true))}${isNum(spy) ? `, ${SPX} ${N(pct(spy, 1, true))}` : ''}.`;
+    return `בבדיקה הסופית, על תקופה שלא שימשה לשום החלטה: המובילות של המודל ${N(pct(m.top_ret, 1, true))} לעסקה בממוצע, כל המניות ${N(pct(m.all_ret, 1, true))}${isNum(spy) ? `, ${SPX} ${N(pct(spy, 1, true))}` : ''}.`;
   }
   function paperLine(p) {
     if (!p || !p.n) return 'תיק הנייר עוד ריק. הוא מתחיל לעקוב אחרי הבחירות מהסריקה הבאה.';
@@ -383,7 +383,7 @@
   }
   function whatsNew() {
     if (state.demo || PREVIEW || !state.data || store.get('seen', 0) >= APP_VERSION) return '';
-    return banner('info', 'חדש בגרסה הזו', 'מניות בתהליך רכישה מסוננות לבד, בכל מניה יש "בדיקה לפני כניסה", ואת גודל התיק מגדירים בהגדרות.',
+    return banner('info', 'חדש בגרסה הזו', 'שלושה מודלים מתחרים וזה שמרוויח יותר נבחר. הוא לומד על כסף ולא רק על הגעה ליעד, ורואה גם קניות של מנהלים שלא קנו שנה ואת חוזק הענף. התוצאה נבדקת על תקופה אחרונה שלא שימשה לשום החלטה – בלשונית ביצועים.',
       '<div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap"><button class="btn small" data-act="guide">איך קוראים את המסך</button><button class="btn small ghost" data-act="seen">הבנתי</button></div>');
   }
 
@@ -652,6 +652,22 @@
     return `<div class="stack">${state.demo ? banner('info', 'נתוני דמו', 'הביצועים במסך הזה מחושבים על שוק מדומה ואינם אומרים דבר על השוק האמיתי.') : ''}${viewModel()}${paper}${learn}${viewBacktest()}</div>`;
   }
 
+  // the model tournament: each candidate on period A (used to choose) and period B (the final, untouched check)
+  function tournament(md) {
+    const v = md.validation || {};
+    const cands = v.candidates || [];
+    if (!cands.length) return '';
+    const all = (v.money && v.money.all) || {}, allA = (v.money_sel && v.money_sel.all) || {};
+    const best = Math.max(0.005, ...cands.flatMap((c) => [Math.abs(c.sel.ret || 0), Math.abs(c.fin.ret || 0)]), Math.abs(all.ret || 0), Math.abs(allA.ret || 0));
+    const row = (label, a, b, chosen) => `<div class="tour-row${chosen ? ' chosen' : ''}"><div class="tour-name">${esc(label)}${chosen ? ' <span class="chip good">נבחר</span>' : ''}</div>
+      <div class="tour-vals"><span>תקופה א׳ <b class="${a > 0 ? 'up' : 'down'}">${pct(a, 1, true)}</b></span><span>בדיקה סופית <b class="${b > 0 ? 'up' : 'down'}">${pct(b, 1, true)}</b></span></div>
+      <div class="tour-bar"><i style="width:${Math.min(100, Math.abs(b || 0) / best * 100).toFixed(0)}%;background:${(b || 0) >= (all.ret || 0) ? 'var(--good)' : 'var(--bad)'}"></i></div></div>`;
+    return `<div class="tour"><div class="eyebrow" style="margin:0 0 6px">התחרות בין המודלים – עסקה ממוצעת של ${v.top_n || 10} המובילות</div>
+      ${cands.map((c) => row(c.label, c.sel.ret, c.fin.ret, c.kind === v.kind)).join('')}
+      ${row('כל המניות (לשם השוואה)', allA.ret, all.ret, false)}
+      <p class="muted small" style="margin:6px 0 0">תקופה א׳ (${dmy(v.sel_start)}–${dmy(v.sel_end)}) שימשה רק לבחירת המודל. הבדיקה הסופית (${dmy(v.test_start)}–${dmy(v.test_end)}) לא שימשה לשום החלטה – לכן היא המדד האמיתי. עובר רק מודל שמנצח את כל המניות בשתיהן.</p></div>`;
+  }
+
   function viewModel() {
     if (state.model === undefined) { loadModel(); return `<div class="card"><h3>מודל הסיכוי</h3><p class="muted">טוען…</p></div>`; }
     const run = cloudReady() ? '<button class="btn small ghost" data-run="train">אמן מחדש</button>' : '';
@@ -698,19 +714,21 @@
     return `<div class="card"><div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><h3>מודל הסיכוי</h3>${run}</div>
       <p class="muted small" style="margin:2px 0 10px">אומן ב־${dmy(md.trained)}${md.demo ? ' · דמו' : ''} · ${md.n_tickers} מניות · ${md.years} שנים · ${Number(md.n_rows || 0).toLocaleString('en-US')} תצפיות</p>
       ${outdated ? banner('info', 'מודל חדש בדרך', 'המודל השמור עונה על השאלה הקודמת, ולכן הוא לא בשימוש עד שהאימון החדש יסתיים.') : ''}
-      ${passed ? '' : banner('warn', 'המודל לא עבר את הבדיקה', 'בשנים שהוא לא ראה, העסקאות שהוא בחר לא היו טובות מהממוצע (בכסף או באחוז ההצלחה), ולכן הוא לא משפיע כרגע על הציונים. הוא יאומן מחדש לבד בעוד חודש.')}
+      ${passed ? '' : banner('warn', 'המודל לא עבר את הבדיקה', v.candidates ? 'כדי לעבור, המניות שהמודל בוחר צריכות להרוויח יותר מכל המניות גם בתקופת הבחירה וגם בבדיקה הסופית. זה לא קרה, ולכן הוא לא משפיע כרגע על הציונים. הוא יאומן מחדש לבד בעוד חודש.' : 'בשנים שהוא לא ראה, העסקאות שהוא בחר לא היו טובות מהממוצע (בכסף או באחוז ההצלחה), ולכן הוא לא משפיע כרגע על הציונים. הוא יאומן מחדש לבד בעוד חודש.')}
+      ${tournament(md)}
       <p class="small" style="margin:0 0 8px">${question}</p>
-      <p class="small" style="margin:0 0 10px">הבדיקה ההוגנת: המודל למד רק משנים מוקדמות, ונבדק על ${dmy(v.test_start)} עד ${dmy(v.test_end)} – תקופה שלא ראה. כל עסקה מדומה כמו שהיא הייתה קורה באמת: יעד, סטופ או יציאה אחרי 3 חודשים, כולל קפיצות במחיר ועמלות.</p>
-      ${rows.length ? `<div class="eyebrow" style="margin:4px 0 4px">עסקה ממוצעת לפי התוכנית</div>${divHead('הפסד', 'רווח')}${moneyRows}` : ''}
+      <p class="small" style="margin:0 0 10px">${v.candidates ? `הבדיקה הסופית: ${dmy(v.test_start)} עד ${dmy(v.test_end)} – תקופה שהמודל לא ראה ושלא שימשה גם לבחירה בין המודלים.` : `הבדיקה ההוגנת: המודל למד רק משנים מוקדמות, ונבדק על ${dmy(v.test_start)} עד ${dmy(v.test_end)} – תקופה שלא ראה.`} כל עסקה מדומה כמו שהיא הייתה קורה באמת: יעד, סטופ או יציאה אחרי 3 חודשים, כולל קפיצות במחיר, עמלות ומרווח קנייה־מכירה שגדל ככל שהמניה פחות נזילה.</p>
+      ${rows.length ? `<div class="eyebrow" style="margin:4px 0 4px">עסקה ממוצעת לפי התוכנית${v.candidates ? ' – בדיקה סופית' : ''}</div>${divHead('הפסד', 'רווח')}${moneyRows}` : ''}
       <div class="chips" style="margin:10px 0">
         ${isNum(v.top_rate) ? `<span class="chip ${passed ? 'good' : ''}">הגיעו ליעד <b>${pct(v.top_rate)}</b> מול ${pct(v.base)} בממוצע</span>` : ''}
         ${isNum(mm.win) ? `<span class="chip">עסקאות ברווח <b>${pct(mm.win)}</b></span>` : ''}
         ${isNum(mm.stop) ? `<span class="chip">נעצרו בסטופ <b>${pct(mm.stop)}</b></span>` : ''}
         ${isNum(mm.days) ? `<span class="chip">החזקה ממוצעת <b>${Math.round(mm.days)}</b> ימי מסחר</span>` : ''}
+        ${isNum(mm.ret_2x_cost) ? `<span class="chip ${mm.ret_2x_cost > 0 ? '' : 'bad'}">גם עם עלויות כפולות: <b>${pct(mm.ret_2x_cost, 1, true)}</b></span>` : ''}
         ${isNum(v.auc) ? `<span class="chip">AUC <b class="num">${v.auc.toFixed(2)}</b></span>` : ''}</div>
       ${years.length ? `<div class="eyebrow" style="margin:4px 0 4px">שנה אחרי שנה: ${isNum(years[0].top_ret) ? 'עסקה ממוצעת של המובילות מול כל המניות' : 'המובילות מול הממוצע'}</div><div class="chips">${years.map(yearChip).join('')}</div>` : ''}
-      ${dec.length && dec.some((d) => isNum(d.ret)) ? `<div class="eyebrow" style="margin:14px 0 4px">10 קבוצות לפי הסיכוי שהמודל נתן – עסקה ממוצעת בכל קבוצה (%)</div>
-        <div class="dec2">${decBars}</div><div class="dec-axis"><span>סיכוי נמוך</span><span>סיכוי גבוה</span></div>
+      ${dec.length && dec.some((d) => isNum(d.ret)) ? `<div class="eyebrow" style="margin:14px 0 4px">10 קבוצות לפי הדירוג של המודל – עסקה ממוצעת בכל קבוצה (%)</div>
+        <div class="dec2">${decBars}</div><div class="dec-axis"><span>דירוג נמוך</span><span>דירוג גבוה</span></div>
         <p class="muted small" style="margin:4px 0 0">אם המודל טוב, העמודות עולות מקבוצה לקבוצה. מניה שנופלת בקבוצה שהפסידה בממוצע לא נבחרת.</p>` : ''}
       ${good.length || bad.length ? `<div class="eyebrow" style="margin:14px 0 4px">מה עבד ב־5 השנים האחרונות (כל אחד לבד)</div>
         ${divHead('פחות מהממוצע', 'יותר מהממוצע')}${good.map(wwRow).join('')}${bad.map(wwRow).join('')}
@@ -815,7 +833,7 @@
         <div class="hist-row"><span>עסקה ממוצעת</span><b class="${tone}">${pct(h.ret, 1, true)}</b></div>
         ${isNum(h.win) ? `<div class="hist-row"><span>עסקאות ברווח</span><b>${pct(h.win)}</b></div>` : ''}
         ${isNum(h.stop) ? `<div class="hist-row"><span>נעצרו בסטופ</span><b>${pct(h.stop)}</b></div>` : ''}
-        <p class="muted small" style="margin:6px 0 0">לפי ${Number(h.n || 0).toLocaleString('en-US')} עסקאות מדומות בשנים שהמודל לא ראה, כולל עמלות. ${h.ret > 0 ? '' : 'בממוצע הן הפסידו, ולכן מניה כזו לא נבחרת. '}</p></div>`;
+        <p class="muted small" style="margin:6px 0 0">לפי ${Number(h.n || 0).toLocaleString('en-US')} עסקאות מדומות בשנים שהמודל לא ראה, כולל עמלות ומרווח. ${h.ret > 0 ? '' : 'בממוצע הן הפסידו, ולכן מניה כזו לא נבחרת. '}</p></div>`;
     }
     out += `<p class="muted small" style="margin:8px 0 0">זה סיכוי, לא הבטחה. גם כשהסיכוי טוב, לרוב המניה לא תגיע ליעד, ולכן הסטופ וגודל הפוזיציה חשובים. הסטופ והיעד מחושבים ממחיר הסגירה האחרון. אם קונים במחיר אחר, שמור על אותו מרחק. איך המודל נבדק – בלשונית ביצועים.</p>`;
     return out;

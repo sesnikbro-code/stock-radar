@@ -84,7 +84,13 @@ class Http:
     ):
         """Return text (or parsed JSON). None on 404. Raises after exhausting retries."""
         host = urlparse(url).netloc
-        key = json.dumps([method, url, params or {}, json_body or {}], sort_keys=True, default=str)
+        # Include request headers in the cache identity. APIs may return different data
+        # for different authorization, language, or version headers.
+        key = json.dumps(
+            [method.upper(), url, params or {}, json_body or {}, headers or {}],
+            sort_keys=True,
+            default=str,
+        )
         cpath = self._cache_path(host, key)
         if self._fresh(cpath, ttl):
             text = cpath.read_text(encoding="utf-8")
@@ -109,7 +115,14 @@ class Http:
                 return None
             if r.status_code in (429, 500, 502, 503, 504):
                 last_err = requests.HTTPError(f"{r.status_code} for {url}")
-                time.sleep(min(60, 3 * (2 ** attempt)))
+                # Honor server throttling guidance when present, while bounding
+                # the wait so a malformed header cannot stall a scheduled scan.
+                retry_after = r.headers.get("Retry-After")
+                try:
+                    delay = float(retry_after) if retry_after is not None else 3 * (2 ** attempt)
+                except (TypeError, ValueError):
+                    delay = 3 * (2 ** attempt)
+                time.sleep(max(0.0, min(60.0, delay)))
                 continue
             r.raise_for_status()
             text = r.text
@@ -143,7 +156,14 @@ class Http:
                 return None
             if r.status_code in (429, 500, 502, 503, 504):
                 last_err = requests.HTTPError(f"{r.status_code} for {url}")
-                time.sleep(min(60, 3 * (2 ** attempt)))
+                # Honor server throttling guidance when present, while bounding
+                # the wait so a malformed header cannot stall a scheduled scan.
+                retry_after = r.headers.get("Retry-After")
+                try:
+                    delay = float(retry_after) if retry_after is not None else 3 * (2 ** attempt)
+                except (TypeError, ValueError):
+                    delay = 3 * (2 ** attempt)
+                time.sleep(max(0.0, min(60.0, delay)))
                 continue
             r.raise_for_status()
             cpath.write_bytes(r.content)
