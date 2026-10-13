@@ -226,7 +226,7 @@ ol.steps li::marker { font-weight: 700; color: var(--accent); }
 /* ---------- bottom nav ---------- */
 .nav { position: fixed; inset-inline: 0; bottom: 0; z-index: 30; background: var(--surface); border-top: 1px solid var(--line);
   padding-bottom: env(safe-area-inset-bottom, 0px); }
-.nav-in { max-width: 680px; margin: 0 auto; display: grid; grid-template-columns: repeat(5, 1fr); height: var(--nav-h); }
+.nav-in { max-width: 680px; margin: 0 auto; display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; height: var(--nav-h); }
 .nav button { border: 0; background: none; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; font-size: 12.5px; color: var(--muted); cursor: pointer; }
 .nav button svg { width: 23px; height: 23px; }
 .nav button[aria-current="page"] { color: var(--accent); font-weight: 700; }
@@ -358,3 +358,20 @@ ol.steps li::marker { font-weight: 700; color: var(--accent); }
 .log li { display: flex; gap: 10px; padding: 8px 0; border-top: 1px solid var(--line); font-size: 14px; line-height: 1.5; }
 .log li:first-child { border-top: 0; }
 .log .when { flex: none; color: var(--muted); font: 500 12.5px/1.7 var(--font-data); }
+
+/* simple view: the four things that matter */
+.scard { cursor: pointer; display: flex; flex-direction: column; gap: 10px; }
+.scard:active { transform: scale(.995); }
+.s-head { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.s-head .tk { font: 600 19px/1 var(--font-data); }
+.s-head .nm { color: var(--muted); font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.s-nums { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.s-num { display: flex; flex-direction: column; gap: 2px; padding: 8px 10px; border-radius: 12px; background: var(--surface-2); min-width: 0; }
+.s-num b { font-size: 19px; line-height: 1.2; }
+.s-num.good b { color: var(--good); } .s-num.warn b { color: var(--warn); } .s-num.bad b { color: var(--bad); }
+.s-item { padding: 10px 0; border-top: 1px solid var(--line); }
+.s-item:first-of-type { border-top: 0; padding-top: 2px; }
+.s-item p { margin: 4px 0 0; font-size: 14px; }
+.s-k { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; font-weight: 700; font-size: 15px; }
+.s-k b { font-size: 17px; }
+.s-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }

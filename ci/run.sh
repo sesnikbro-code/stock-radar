@@ -27,15 +27,15 @@ if git fetch -q origin main 2>/dev/null; then
 fi
 
 # GitHub sometimes skips scheduled runs, so the workflow has backup times later in the morning.
-# A backup run stops here when today's scan already exists.
+# A backup run stops here when today's scan already exists and was complete (a partial scan is tried again).
 if [ "${GITHUB_EVENT_NAME:-}" = schedule ] && [ "$MODE" = scan ] && python3 - <<'PY'
 import json, sys
 from datetime import datetime, timezone
 try:
-    day = json.load(open("docs/data/latest.json", encoding="utf-8"))["date"]
+    d = json.load(open("docs/data/latest.json", encoding="utf-8"))
 except Exception:
     sys.exit(1)
-sys.exit(0 if day == datetime.now(timezone.utc).date().isoformat() else 1)
+sys.exit(0 if d.get("date") == datetime.now(timezone.utc).date().isoformat() and not d.get("degraded") else 1)
 PY
 then
   echo "today's scan already exists - nothing to do in this backup run"

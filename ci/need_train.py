@@ -1,6 +1,6 @@
 """Prints 'yes' when the cloud should (re)train the probability model:
   - there is no model, or it answers a different question than config.yaml now asks (e.g. after an update), or
-  - it is older than train.retrain_days, or
+  - it is older than train.retrain_days, or an update added new checks to the training (TRAIN_REV), or
   - the self-review asked for it (the model picks worse live than in its test, or a suspected lesson waits for
     its check on history) and the model is at least a week old,
 and the same question was not already attempted in the last 6 days (so a failing training does not loop)."""
@@ -36,6 +36,18 @@ def train_config() -> tuple[bool, int, str | None]:
     return enabled, int(d.group(1)) if d else 30, None
 
 
+def train_rev() -> int:
+    """What the current training produces (an older model is retrained once after an update)."""
+    try:
+        sys.path.insert(0, str(ROOT))
+        from radar.train import TRAIN_REV
+        return int(TRAIN_REV)
+    except Exception:  # noqa: BLE001
+        m = re.search(r"^TRAIN_REV\s*=\s*(\d+)", (ROOT / "radar" / "train.py").read_text(encoding="utf-8"), re.M) \
+            if (ROOT / "radar" / "train.py").exists() else None
+        return int(m.group(1)) if m else 1
+
+
 def review_request(trained: datetime) -> bool:
     """The self-review asked for an early retraining after this model was trained."""
     try:
@@ -59,6 +71,8 @@ def main() -> str:
             trained = trained.replace(tzinfo=timezone.utc)
         same_question = spec is None or model.get("spec") == spec
         fresh = same_question and (datetime.now(timezone.utc) - trained).days < retrain_days
+        if fresh and int(model.get("train_rev") or 1) < train_rev():   # an update added new checks to the training
+            fresh = False
         if fresh and review_request(trained):
             fresh = False
     except (OSError, ValueError, KeyError, TypeError):
@@ -68,16 +82,22 @@ def main() -> str:
     try:
         parts = (DATA / "model_attempt.txt").read_text(encoding="utf-8").split()
         last = date.fromisoformat(parts[0])
-        attempted_spec = parts[1] if len(parts) > 1 else None
-        if (date.today() - last).days < 6 and (spec is None or attempted_spec == spec):
+        attempted = parts[1] if len(parts) > 1 else None
+        # the same question with the same training was already tried this week (a failing training must not loop)
+        if (date.today() - last).days < 6 and (spec is None or attempted == attempt_key(spec)):
             return "no"
     except (OSError, ValueError, IndexError):
         pass
     return "yes"
 
 
+def attempt_key(spec: str | None) -> str:
+    """The question (spec) plus the training revision: an update that changes the training is a new attempt."""
+    return f"{spec or ''}#r{train_rev()}"
+
+
 def current_spec() -> str:
-    return train_config()[2] or ""
+    return attempt_key(train_config()[2])
 
 
 if __name__ == "__main__":

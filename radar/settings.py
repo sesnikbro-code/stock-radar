@@ -36,6 +36,11 @@ DEFAULTS: dict = {
         "min_upside_score": 60,
         "max_risk_score": 80,
         "require_model_edge": True,   # skip picks whose probability level lost money in the model's test
+        "pick_by_model": True,        # a tested model chooses the picks; the other signals can only veto
+        "model_candidates": 80,       # the model ranks the whole market; its top stocks get the full check
+        "tech_candidates": 30,        # plus the best of the technical screen
+        "min_upside_model": 60,       # the model's picks still need 60+ potential (enough signs agree)
+        "max_per_sector": 3,          # at most this many picks from one sector a day (0 = no limit)
         "history_period": "2y",
         "workers": 4,
     },
@@ -53,6 +58,7 @@ DEFAULTS: dict = {
         "enabled": True,
         "lookback_days": 7,
         "use_finnhub": True,
+        "use_rss": True,              # free Google News / Yahoo RSS feeds when a stock has no headlines
         "use_llm": False,
         "llm_model": "claude-haiku-5-5",
         "show_original_headlines": True,
@@ -92,8 +98,9 @@ DEFAULTS: dict = {
     },
     "paper": {
         "enabled": True,
-        "max_open_positions": 15,
-        "max_hold_days": 90,
+        "max_open_positions": 20,
+        "max_new_per_day": 3,         # new positions a day, so the portfolio keeps following new picks
+        "max_hold_days": 90,          # only for positions without a plan (the plan has its own holding days)
         "trailing_stop": False,       # follow the same plan the model was tested on: fixed stop + target
         "take_profit": True,
     },
@@ -133,6 +140,7 @@ DEFAULTS: dict = {
         "yahoo_minutes": 20,
         "workers": 4,
         "retrain_days": 30,         # the cloud retrains automatically when the model is older than this
+        "exit_tournament": True,    # test other exit plans on the model's picks; adopt one only if it wins twice
     },
 }
 

@@ -256,8 +256,12 @@ class ProbModel:
 
     @property
     def base_ret(self) -> float | None:
-        a = ((self.meta.get("validation") or {}).get("money_all") or {})
-        return a.get("ret")
+        """Average trade of all stocks in the test (under the chosen exit plan when there is one)."""
+        v = self.meta.get("validation") or {}
+        b = ((v.get("band") or {}).get("all_fin")) or {}
+        if b.get("ret") is not None:
+            return b["ret"]
+        return (v.get("money_all") or {}).get("ret")
 
     def bucket(self, score: float) -> dict | None:
         """What happened in the out-of-sample test to stocks that got a similar score."""
@@ -268,6 +272,44 @@ class ProbModel:
             if d.get("p_hi") is not None and score <= d["p_hi"]:
                 return d
         return dec[-1]
+
+    # ---------------------------------------------------------- where a stock stands among all stocks today
+    @property
+    def plan(self) -> dict | None:
+        """The exit plan chosen in training (None for models trained before the exit-plan tournament)."""
+        return self.meta.get("plan")
+
+    @property
+    def band_frac(self) -> float:
+        """Share of stocks the model's tested picks came from each day (its top 10 of the stocks in training)."""
+        b = (self.meta.get("validation") or {}).get("band") or {}
+        if b.get("frac"):
+            return float(b["frac"])
+        per_day = float(self.meta.get("n_rows") or 0) / max(1.0, float(self.meta.get("n_dates") or 1))
+        top_n = float((self.meta.get("validation") or {}).get("top_n") or 10)
+        return float(min(0.1, top_n / per_day)) if per_day > 0 else 0.02
+
+    def band_stats(self) -> dict | None:
+        """What the model's own top picks did in the final check (under the chosen exit plan)."""
+        v = self.meta.get("validation") or {}
+        st = ((v.get("band") or {}).get("fin")) or ((v.get("money") or {}).get("model"))
+        if not st:
+            return None
+        return {"rate": st.get("hit"), "ret": st.get("ret"), "stop": st.get("stop"), "win": st.get("win"),
+                "n": st.get("n"), "band": True}
+
+    def rank_bucket(self, pct: float | None, score: float | None = None) -> tuple[int | None, dict | None]:
+        """(level, what happened in the test to stocks at this place in the day's ranking). Stocks in the band of
+        the model's picks get the result of the picks themselves; level 10 = the band."""
+        if pct is None:
+            return self.bucket_index(score), self.bucket(score)
+        if pct >= 1 - self.band_frac:
+            return 10, self.band_stats()
+        rd = (self.meta.get("validation") or {}).get("rank_deciles")
+        if not rd:   # a model trained before the ranking levels existed: the old score levels
+            return self.bucket_index(score), self.bucket(score)
+        i = min(9, max(0, int(pct * 10 - 1e-9)))
+        return i, rd[i]
 
     def bucket_index(self, score: float) -> int | None:
         dec = (self.meta.get("validation") or {}).get("deciles") or []

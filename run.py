@@ -79,7 +79,10 @@ def cmd_scan(s, args) -> str:
     if args.open:
         webbrowser.open(html.resolve().as_uri())
     kind = "סריקת הדמו" if args.demo else "הסריקה היומית"
-    return f"{kind} הסתיימה: {len(res['picks'])} מניות נבחרו מתוך {res['n_deep']} שנבדקו לעומק"
+    msg = f"{kind} הסתיימה: {len(res['picks'])} מניות נבחרו מתוך {res['n_deep']} שנבדקו לעומק"
+    if res.get("degraded"):
+        msg += ". הסריקה חלקית (" + "; ".join(res["degraded"]) + "), ולכן ריצת הגיבוי תנסה שוב"
+    return msg
 
 
 def cmd_ticker(s, args) -> str:

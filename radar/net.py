@@ -27,6 +27,8 @@ HOST_INTERVALS = {
     "api.stlouisfed.org": 0.3,
     "api.telegram.org": 0.5,
     "api.callmebot.com": 3.0,
+    "news.google.com": 1.0,       # free news feeds: be gentle
+    "feeds.finance.yahoo.com": 0.5,
 }
 
 FOREVER = -1
@@ -107,7 +109,8 @@ class Http:
                 )
             except requests.RequestException as e:
                 last_err = e
-                time.sleep(min(30, 2 ** attempt))
+                if attempt < retries:   # no point waiting after the last attempt
+                    time.sleep(min(30, 2 ** attempt))
                 continue
             if r.status_code == 404:
                 if ttl is not None and cache_404:
@@ -122,7 +125,8 @@ class Http:
                     delay = float(retry_after) if retry_after is not None else 3 * (2 ** attempt)
                 except (TypeError, ValueError):
                     delay = 3 * (2 ** attempt)
-                time.sleep(max(0.0, min(60.0, delay)))
+                if attempt < retries:
+                    time.sleep(max(0.0, min(60.0, delay)))
                 continue
             r.raise_for_status()
             text = r.text
@@ -150,7 +154,8 @@ class Http:
                 r = self.session.get(url, timeout=timeout)
             except requests.RequestException as e:
                 last_err = e
-                time.sleep(min(30, 2 ** attempt))
+                if attempt < retries:   # no point waiting after the last attempt
+                    time.sleep(min(30, 2 ** attempt))
                 continue
             if r.status_code in (403, 404):
                 return None
@@ -163,7 +168,8 @@ class Http:
                     delay = float(retry_after) if retry_after is not None else 3 * (2 ** attempt)
                 except (TypeError, ValueError):
                     delay = 3 * (2 ** attempt)
-                time.sleep(max(0.0, min(60.0, delay)))
+                if attempt < retries:
+                    time.sleep(max(0.0, min(60.0, delay)))
                 continue
             r.raise_for_status()
             cpath.write_bytes(r.content)

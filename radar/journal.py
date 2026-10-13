@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS evaluations (
 CREATE TABLE IF NOT EXISTS paper (
     id INTEGER PRIMARY KEY AUTOINCREMENT, ticker TEXT, entry_date TEXT, entry_price REAL, initial_stop REAL,
     stop REAL, atr REAL, shares INT, status TEXT, exit_date TEXT, exit_price REAL, exit_reason TEXT,
-    last_price REAL);
+    last_price REAL, plan TEXT);
 CREATE TABLE IF NOT EXISTS firm_calls (
     firm TEXT, ticker TEXT, date TEXT, direction INT, excess REAL, hit INT,
     PRIMARY KEY (firm, ticker, date, direction));
@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS weights (signal TEXT PRIMARY KEY, factor REAL, ic REA
 CREATE TABLE IF NOT EXISTS predictions (
     run_date TEXT, ticker TEXT, bar_date TEXT, pick INT, why_not TEXT, price REAL, atr REAL, cost REAL,
     prob REAL, exp_ret REAL, bucket INT, model TEXT, upside REAL, risk REAL, sector TEXT, earnings_date TEXT,
-    risk_off INT, ext50 REAL, feats TEXT, signals TEXT, pros TEXT, PRIMARY KEY (run_date, ticker));
+    risk_off INT, ext50 REAL, feats TEXT, signals TEXT, pros TEXT, plan TEXT, PRIMARY KEY (run_date, ticker));
 CREATE TABLE IF NOT EXISTS outcomes (
     run_date TEXT, ticker TEXT, status TEXT, entry_date TEXT, entry REAL, stop REAL, target REAL,
     exit_date TEXT, exit REAL, kind INT, ret REAL, r REAL, days INT, spy REAL, mfe_r REAL,
@@ -43,6 +43,28 @@ CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT);
 """
 
 HORIZONS = (30, 90)
+# columns added after a table was first created (older journals get them on open)
+ADDED_COLUMNS = [("predictions", "plan", "TEXT"), ("paper", "plan", "TEXT")]
+
+
+def plan_text(plan: dict | None) -> str | None:
+    """Compact form of an exit plan: stop|target|days|trailing (empty = none)."""
+    if not plan:
+        return None
+    f = lambda v: "" if v in (None, 0) else f"{float(v):g}"  # noqa: E731
+    return "|".join([f(plan.get("stop_atr")), f(plan.get("target_r")), str(int(plan.get("window") or 63)),
+                     f(plan.get("trail_atr"))])
+
+
+def plan_from_text(s: str | None, default: dict | None = None) -> dict | None:
+    if not s:
+        return default
+    try:
+        a, b, c, d = (s.split("|") + ["", "", "", ""])[:4]
+        return {"stop_atr": float(a), "target_r": float(b) if b else None, "window": int(c or 63),
+                "trail_atr": float(d) if d else None}
+    except ValueError:
+        return default
 
 
 def spearman(x: pd.Series, y: pd.Series) -> float:
@@ -59,6 +81,11 @@ class Journal:
         self.path = Path(path)
         self.conn = sqlite3.connect(self.path)
         self.conn.executescript(SCHEMA)
+        for table, col, typ in ADDED_COLUMNS:
+            have = {r[1] for r in self.conn.execute(f"PRAGMA table_info({table})")}
+            if col not in have:
+                self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
+        self.conn.commit()
 
     def close(self):
         self.conn.commit()
@@ -189,8 +216,8 @@ class Journal:
         return [r[0] for r in cur]
 
     # ------------------------------------------------------------ paper trading
-    # A pick becomes a 'pending' order at the scan's closing price. It is filled at the NEXT trading
-    # day's open (what you could really get), keeping the same dollar distance to the stop.
+    # A pick becomes a 'pending' order. It is filled at the open of the first trading day after the prices the scan
+    # used (what you could really get), keeping the same dollar distance to the stop.
     def _rows(self, where: str = "") -> list[dict]:
         cols = [d[1] for d in self.conn.execute("PRAGMA table_info(paper)")]
         return [dict(zip(cols, r)) for r in self.conn.execute(f"SELECT * FROM paper {where} ORDER BY entry_date, id")]
@@ -198,32 +225,45 @@ class Journal:
     def open_positions(self) -> list[dict]:
         return self._rows("WHERE status IN ('open', 'pending')")
 
-    def paper_open(self, picks: list[dict], today: date, max_open: int) -> int:
+    def paper_open(self, picks: list[dict], today: date, max_open: int, bar_date: date | None = None,
+                   max_new: int = 0, plan: dict | None = None) -> int:
+        """bar_date: the day of the last prices the scan used (the order fills on the next trading day's open).
+        max_new: at most this many new positions a day (0 = no limit), so the portfolio keeps taking new picks
+        over time instead of filling up on the first day."""
         held = {p["ticker"] for p in self.open_positions()}
         n_open, opened = len(held), 0
+        ref = (bar_date or today).isoformat()
         for r in picks:
-            plan = r.get("plan") or {}
-            if r["ticker"] in held or n_open >= max_open or not plan.get("shares"):
+            pl = r.get("plan") or {}
+            if r["ticker"] in held or n_open >= max_open or not pl.get("shares"):
                 continue
+            if max_new and opened >= max_new:
+                break
             self.conn.execute(
-                "INSERT INTO paper (ticker, entry_date, entry_price, initial_stop, stop, atr, shares, status, last_price) "
-                "VALUES (?,?,?,?,?,?,?, 'pending', ?)",
-                (r["ticker"], today.isoformat(), r["price"], plan["stop"], plan["stop"], r.get("atr"),
-                 plan["shares"], r["price"]))
+                "INSERT INTO paper (ticker, entry_date, entry_price, initial_stop, stop, atr, shares, status, last_price, plan) "
+                "VALUES (?,?,?,?,?,?,?, 'pending', ?, ?)",
+                (r["ticker"], ref, r["price"], pl["stop"], pl["stop"], r.get("atr"), pl["shares"], r["price"],
+                 plan_text(plan)))
             n_open += 1
             opened += 1
         self.conn.commit()
         return opened
 
     def paper_update(self, panel: dict[str, pd.DataFrame], today: date, cfg: dict, atr_mult: float,
-                     target_r: float | None = None) -> None:
-        """Replays every open position from its entry with the app's plan: stop, optional target
-        (entry + target_r x the initial risk), optional trailing stop, and a maximum holding time."""
+                     target_r: float | None = None, default_plan: dict | None = None) -> None:
+        """Replays every open position from its entry with its plan: stop, target (entry + target_r x the initial
+        risk) or none, trailing stop or fixed, and a maximum holding time in trading days."""
         o, h, lo, c = panel["Open"], panel["High"], panel["Low"], panel["Close"]
         for p in self.open_positions():
             t = p["ticker"]
             if t not in c.columns:
                 continue
+            pl = plan_from_text(p.get("plan"), default_plan)
+            tr_ = pl.get("target_r") if pl else target_r
+            if pl is not None and not cfg.get("take_profit", True):
+                tr_ = None
+            trail = (pl or {}).get("trail_atr") or (atr_mult if cfg.get("trailing_stop") else None)
+            window = int((pl or {}).get("window") or 0)
             bars = pd.DataFrame({"o": o[t], "h": h[t], "l": lo[t], "c": c[t]}).dropna()
             bars = bars[bars.index > pd.Timestamp(p["entry_date"])]
             if p["status"] == "pending":
@@ -239,10 +279,12 @@ class Journal:
                 bars = bars[bars.index >= fill_day]
                 first_is_fill = True
             else:
-                first_is_fill = False
+                bars = pd.DataFrame({"o": o[t], "h": h[t], "l": lo[t], "c": c[t]}).dropna()
+                bars = bars[bars.index >= pd.Timestamp(p["entry_date"])]   # replay from the fill day itself
+                first_is_fill = True
             stop, high_close = p["initial_stop"], p["entry_price"]   # replay from the entry: same result every day
             risk = p["entry_price"] - p["initial_stop"]
-            target = p["entry_price"] + target_r * risk if target_r and risk > 0 else None
+            target = p["entry_price"] + tr_ * risk if tr_ and risk > 0 else None
             exit_price = exit_date = reason = None
             for i, (d, b) in enumerate(bars.iterrows()):
                 first = first_is_fill and i == 0
@@ -259,11 +301,14 @@ class Journal:
                     exit_price, exit_date, reason = target, d, "target"
                     break
                 high_close = max(high_close, b["c"])
-                if cfg.get("trailing_stop") and p["atr"]:
-                    stop = max(stop, high_close - atr_mult * p["atr"])
-            last = float(bars["c"].iloc[-1]) if len(bars) else p["entry_price"]
+                if trail and p["atr"]:
+                    stop = max(stop, high_close - trail * p["atr"])
+                if window and i + 1 >= window:   # held the plan's number of trading days: sell at the close
+                    exit_price, exit_date, reason = b["c"], d, "time"
+                    break
+            last = float(bars["c"].iloc[-1]) if len(bars) else (p.get("last_price") or p["entry_price"])
             held_days = (today - date.fromisoformat(p["entry_date"])).days
-            if reason is None and held_days >= cfg.get("max_hold_days", 90) and len(bars):
+            if reason is None and not window and held_days >= cfg.get("max_hold_days", 90) and len(bars):
                 exit_price, exit_date, reason = last, bars.index[-1], "time"
             if reason:
                 self.conn.execute("UPDATE paper SET status='closed', exit_date=?, exit_price=?, exit_reason=?, stop=?, "
@@ -274,7 +319,8 @@ class Journal:
                 self.conn.execute("UPDATE paper SET stop=?, last_price=? WHERE id=?", (stop, last, p["id"]))
         self.conn.commit()
 
-    def paper_summary(self, spy: pd.Series | None, target_r: float | None = None) -> dict:
+    def paper_summary(self, spy: pd.Series | None, target_r: float | None = None,
+                      default_plan: dict | None = None) -> dict:
         rows = self._rows()
         if not rows:
             return {"n": 0}
@@ -295,8 +341,13 @@ class Journal:
             base = s[s.index <= pd.Timestamp(first)]
             if len(base):
                 spy_ret = float(s.iloc[-1] / base.iloc[-1] - 1)
-        tgt = lambda r: (r["entry_price"] + target_r * (r["entry_price"] - r["initial_stop"])  # noqa: E731
-                         if target_r and r["initial_stop"] and r["entry_price"] > r["initial_stop"] else None)
+        def tgt(r):
+            pl = plan_from_text(r.get("plan"), default_plan)
+            tr_ = (pl or {}).get("target_r") if pl else target_r
+            if not target_r and pl is None:
+                return None
+            return (r["entry_price"] + tr_ * (r["entry_price"] - r["initial_stop"])
+                    if tr_ and r["initial_stop"] and r["entry_price"] > r["initial_stop"] else None)
         pos = lambda r, st: {"ticker": r["ticker"], "entry": r["entry_price"], "last": r["last_price"],  # noqa: E731
                              "stop": r["stop"], "target": tgt(r), "since": r["entry_date"], "status": st,
                              "shares": r["shares"],

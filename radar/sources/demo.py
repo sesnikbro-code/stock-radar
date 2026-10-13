@@ -322,7 +322,7 @@ class DemoSources:
     def country_conflict(self, name):
         return {"escalation": 0.5, "ratio": 1.4} if name == "Israel" else None
 
-    def extra_news(self, ticker, days):
+    def extra_news(self, ticker, days, name=None, have=0):
         return []
 
     def classify_news(self, ticker, name, news):

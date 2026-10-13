@@ -70,20 +70,26 @@ def expected_move_3m(atr_pct: float | None) -> float | None:
     return atr_pct / 1.2 * math.sqrt(63)
 
 
-def position_plan(price: float, atr: float | None, risk_cfg: dict) -> dict:
+def position_plan(price: float, atr: float | None, risk_cfg: dict, plan: dict | None = None) -> dict:
+    """Stop, target and position size. plan: the exit plan chosen in training (stop x ATR, target x the risk or
+    none, holding days, trailing stop); without one, the plan in config.yaml."""
     account = float(risk_cfg["account_size"])
     if not price or not atr:
         return {}
-    stop = max(0.01, price - risk_cfg["atr_stop_multiple"] * atr)
+    k = float(plan["stop_atr"]) if plan and plan.get("stop_atr") else float(risk_cfg["atr_stop_multiple"])
+    target_r = float((plan.get("target_r") if plan else risk_cfg.get("target_r")) or 0)
+    stop = max(0.01, price - k * atr)
     risk_per_share = price - stop
     risk_amount = account * risk_cfg["risk_per_trade_pct"] / 100
     shares = int(risk_amount // risk_per_share) if risk_per_share > 0 else 0
     max_value = account * risk_cfg["max_position_pct"] / 100
     if shares * price > max_value:
         shares = int(max_value // price)
-    target_r = float(risk_cfg.get("target_r") or 0)
     target = price + target_r * risk_per_share if target_r > 0 else None
+    trail = float(plan["trail_atr"]) if plan and plan.get("trail_atr") else None
     return {"stop": round(stop, 2), "stop_pct": stop / price - 1, "shares": shares,
             "target": round(target, 2) if target else None, "target_pct": (target / price - 1) if target else None,
             "value": round(shares * price, 2), "risk_amount": round(shares * risk_per_share, 2),
-            "pct_of_account": shares * price / account if account else 0}
+            "pct_of_account": shares * price / account if account else 0,
+            "days": int((plan or {}).get("window") or 63), "trail_atr": trail,
+            "trail_pct": trail * atr / price if trail else None, "stop_atr": k}

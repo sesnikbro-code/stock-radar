@@ -27,6 +27,11 @@ scan:
   min_upside_score: 60     # ציון פוטנציאל מינימלי (0-100)
   max_risk_score: 80       # ציון סיכון מקסימלי (0-100)
   require_model_edge: true # לא לבחור מניה שבבדיקת המודל, מניות עם סיכוי דומה הפסידו בממוצע
+  pick_by_model: true      # מודל שעבר את הבדיקה בוחר את המניות. שאר האותות יכולים רק לפסול
+  model_candidates: 80     # המודל מדרג את כל השוק, והמובילות שלו עוברות בדיקה מעמיקה
+  tech_candidates: 30      # ועוד המובילות של הסינון הטכני
+  min_upside_model: 60     # גם בחירה של המודל צריכה פוטנציאל 60 ומעלה (מספיק סימנים מסכימים)
+  max_per_sector: 3        # לכל היותר 3 בחירות מאותו ענף ביום (0 = בלי הגבלה)
   history_period: 2y
   workers: 4
 
@@ -47,6 +52,7 @@ news:
   enabled: true
   lookback_days: 7
   use_finnhub: true        # פעיל רק אם יש FINNHUB_API_KEY ב-.env
+  use_rss: true            # חדשות חינם מ-Google News ומ-Yahoo כשאין כותרות למניה
   use_llm: false           # true = Claude מסווג את הכותרות ומסכם בעברית (דורש ANTHROPIC_API_KEY, בתשלום)
   llm_model: claude-haiku-5-5
   show_original_headlines: true   # להציג בדוח את הכותרות המקוריות (באנגלית) כקישורים
@@ -103,8 +109,9 @@ risk:
 
 paper:                     # מסחר על נייר: המערכת "קונה" את הבחירות שלה ועוקבת אחרי התוצאה
   enabled: true
-  max_open_positions: 15
-  max_hold_days: 90
+  max_open_positions: 20
+  max_new_per_day: 3       # עד 3 עסקאות חדשות ביום, כדי שהתיק ימשיך לעקוב אחרי בחירות חדשות
+  max_hold_days: 90        # רק לפוזיציות ישנות בלי תוכנית (לתוכנית יש מספר ימים משלה)
   trailing_stop: false     # אותה תוכנית שהמודל נבדק עליה: סטופ קבוע, יעד, ועד 3 חודשים
   take_profit: true        # סגירה ביעד
 
@@ -141,3 +148,4 @@ train:                     # מודל הסיכוי: לומד מ-5 שנות הי�
   horizon_days: 63         # תוך 3 חודשים
   cost_pct: 0.2            # עמלות ומרווח לעסקה, באחוזים
   retrain_days: 30         # הענן מאמן מחדש לבד פעם בחודש
+  exit_tournament: true    # בודק תוכניות יציאה אחרות על הבחירות של המודל. מחליף רק אם ניצחה פעמיים

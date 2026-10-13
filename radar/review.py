@@ -28,7 +28,7 @@ from datetime import date, timedelta
 import numpy as np
 import pandas as pd
 
-from .journal import spearman
+from .journal import plan_from_text, plan_text, spearman
 from .signals import SIGNAL_LABELS
 from .util import clip, num, pct
 
@@ -69,6 +69,7 @@ WHY_NOT_HE = {
     "upside": "ציון הפוטנציאל היה נמוך מהסף", "risk": "ציון הסיכון היה גבוה מהסף",
     "edge": "ברמת הסיכוי שלהן עסקאות הפסידו בבדיקה", "deal": "בתהליך רכישה או פשיטת רגל",
     "lesson": "לקח שלמדתי", "rank": "לא נכנסו לרשימת המובילות",
+    "band": "לא היו בין המובילות של המודל", "sector": "כבר נבחרו 3 מניות מאותו ענף",
 }
 
 
@@ -213,7 +214,8 @@ def _sig_scores(signals: dict) -> dict:
     return {k: (round(float(s.score), 3) if s.conf > 0 else None) for k, s in (signals or {}).items()}
 
 
-def record(journal, today: date, bar_date: date, results: list[dict], ctx, model, cost_base: float) -> int:
+def record(journal, today: date, bar_date: date, results: list[dict], ctx, model, cost_base: float,
+           plan: dict | None = None) -> int:
     """Store what the scan predicted for every stock it analysed in depth."""
     from .train import trade_costs
 
@@ -232,9 +234,10 @@ def record(journal, today: date, bar_date: date, results: list[dict], ctx, model
             r.get("bucket"), mid if r.get("prob") is not None else None, num(r.get("upside")), num(r.get("risk")),
             r.get("sector") or "", str(ed)[:10] if ed else None, risk_off, num(r.get("ext50")),
             _pack(conn, "feat", feats, cache), _pack(conn, "sig", _sig_scores(r.get("signals")), cache),
-            json.dumps((r.get("why") or {}).get("pros", [])[:3], ensure_ascii=False) if r.get("pick") else None))
+            json.dumps((r.get("why") or {}).get("pros", [])[:3], ensure_ascii=False) if r.get("pick") else None,
+            plan_text(plan)))
     journal.conn.execute("DELETE FROM predictions WHERE run_date=?", (today.isoformat(),))
-    journal.conn.executemany("INSERT OR REPLACE INTO predictions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+    journal.conn.executemany("INSERT OR REPLACE INTO predictions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                              rows)
     journal.conn.commit()
     return len(rows)
@@ -274,23 +277,22 @@ def _backfill(conn, panel, fpanel, cost_base: float) -> int:
             pros = []
         rows.append((run_date, t, bar, int(pick or 0), None if pick else "unknown", price, atr, cost, None, None, None,
                      None, up, risk, "", None, None, None, feats, _pack(conn, "sig", unpack("sig", sig), cache),
-                     json.dumps(pros, ensure_ascii=False) if pick else None))
-    conn.executemany("INSERT OR REPLACE INTO predictions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+                     json.dumps(pros, ensure_ascii=False) if pick else None, None))
+    conn.executemany("INSERT OR REPLACE INTO predictions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
     conn.commit()
     return len(rows)
 
 
 def update_outcomes(journal, panel, fpanel, settings) -> int:
-    """Replay the plan for every recommendation that is not finished yet (same code as the training)."""
-    from .train import simulate_trades
+    """Replay the plan of every recommendation that is not finished yet (same code as the training). Each
+    recommendation keeps the exit plan that was in force when it was made."""
+    from .train import base_plan, simulate_trades
 
     conn = journal.conn
-    k = float(settings.get("risk.atr_stop_multiple"))
-    target_r = float(settings.get("risk.target_r") or 3.0)
-    window = int(settings.get("train.horizon_days") or 63)
+    default = base_plan(settings)
     cost_base = float(settings.get("train.cost_pct") or 0.2) / 100
     _backfill(conn, panel, fpanel, cost_base)
-    rows = conn.execute("""SELECT p.run_date, p.ticker, p.bar_date, p.atr, p.cost FROM predictions p
+    rows = conn.execute("""SELECT p.run_date, p.ticker, p.bar_date, p.atr, p.cost, p.plan FROM predictions p
         LEFT JOIN outcomes o ON o.run_date=p.run_date AND o.ticker=p.ticker
         WHERE p.atr > 0 AND p.bar_date IS NOT NULL AND (o.ticker IS NULL OR o.status='open' OR o.ret21 IS NULL)""").fetchall()
     if not rows:
@@ -302,9 +304,12 @@ def update_outcomes(journal, panel, fpanel, settings) -> int:
     groups = defaultdict(list)
     for r in rows:
         if r[1] in C.columns:
-            groups[r[2]].append(r)
+            groups[(r[2], r[5] or "")].append(r)
     out = []
-    for bar_date, g in groups.items():
+    for (bar_date, ptxt), g in groups.items():
+        pl = plan_from_text(ptxt, default) or default
+        k, target_r, window = float(pl["stop_atr"]), pl.get("target_r"), int(pl.get("window") or 63)
+        trail = pl.get("trail_atr")
         p = int(idx.searchsorted(pd.Timestamp(bar_date), "right")) - 1
         avail = len(idx) - p - 1
         if p < 0 or avail < 1:
@@ -315,8 +320,9 @@ def update_outcomes(journal, panel, fpanel, settings) -> int:
         atr[p] = [r[3] for r in g]
         cost = np.array([[r[4] if r[4] is not None else cost_base for r in g]])
         w = min(window, avail)
-        res = simulate_trades(*mats, atr, [p], w, k, target_r, None, cost, spy_o, spy_c)
-        r21 = simulate_trades(*mats, atr, [p], EARLY, k, target_r, None, cost, spy_o, spy_c) if avail >= EARLY else None
+        res = simulate_trades(*mats, atr, [p], w, k, target_r, None, cost, spy_o, spy_c, trail)
+        r21 = (simulate_trades(*mats, atr, [p], min(EARLY, window), k, target_r, None, cost, spy_o, spy_c, trail)
+               if avail >= min(EARLY, window) else None)
         for j, r in enumerate(g):
             ret = res["ret"][0, j]
             if not np.isfinite(ret):
@@ -328,7 +334,7 @@ def update_outcomes(journal, panel, fpanel, settings) -> int:
             hi = np.nanmax(mats[1][p + 1:p + 1 + held, j]) if held > 0 else e
             c = float(cost[0, j])
             out.append((r[0], r[1], "closed" if closed else "open", idx[p + 1].date().isoformat(), float(e),
-                        float(e - risk), float(e + target_r * risk),
+                        float(e - risk), float(e + target_r * risk) if target_r else None,
                         idx[min(p + held, len(idx) - 1)].date().isoformat() if closed else None,
                         float(e * (1 + ret + c)), kind if closed else 0, float(ret), float(res["r"][0, j]), held,
                         num(res["spy"][0, j]), float((hi - e) / risk) if risk > 0 and np.isfinite(hi) else None,
@@ -684,7 +690,7 @@ def run(journal, panel, fpanel, today: date, settings, model) -> dict:
     filt = []
     pick_rx = P["rx21"]
     wn = N["why_not"].fillna("unknown")
-    for why in ("upside", "risk", "edge", "deal", "rank"):
+    for why in ("upside", "risk", "edge", "deal", "band", "sector", "rank"):
         g = N[wn == why]
         if len(g) < 5:
             continue
@@ -889,6 +895,7 @@ def brief(rv: dict | None) -> dict | None:
         return None
     s, c = rv.get("score") or {}, rv.get("counts") or {}
     return {"graded": c.get("graded_picks", 0), "edge": s.get("edge"), "verdict": s.get("verdict"),
+            "pick_ret": s.get("pick_ret"), "pick_spy": s.get("pick_spy"),
             "drift": (rv.get("drift") or {}).get("status"),
             "lessons": sum(1 for lz in rv.get("lessons") or [] if lz["status"] in ("adopted", "adopted_live")),
             "next_check": c.get("next_check")}

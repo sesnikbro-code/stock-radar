@@ -33,6 +33,8 @@ from .sources import get_sources
 
 log = logging.getLogger("radar.train")
 
+TRAIN_REV = 2   # 2 = exit-plan tournament, within-day rank levels and the self-review's lesson checks
+
 # conditions for the "what worked in history" list shown in the app: (feature, Hebrew text, test)
 _RANKED = {  # continuous features: compared within each day (top / bottom 20% of all stocks that day)
     "mom_6_1": ("מומנטום חזק בחצי השנה האחרונה (20% החזקות)", "מומנטום חלש בחצי השנה האחרונה (20% החלשות)"),
@@ -75,12 +77,13 @@ def _sample(tickers: list[str], max_n: int) -> list[str]:
 def simulate_trades(O: np.ndarray, H: np.ndarray, L: np.ndarray, C: np.ndarray, atr: np.ndarray, positions,
                     window: int, stop_atr: float, target_r: float | None = None, target_pct: float | None = None,
                     cost: float | np.ndarray = 0.002, spy_open: np.ndarray | None = None,
-                    spy_close: np.ndarray | None = None) -> dict[str, np.ndarray]:
-    """Replays the app's trading plan for every stock on every snapshot day (arrays: snapshots x stocks).
+                    spy_close: np.ndarray | None = None, trail_atr: float | None = None) -> dict[str, np.ndarray]:
+    """Replays a trading plan for every stock on every snapshot day (arrays: snapshots x stocks).
 
     Buy at the next day's open. Stop = entry - stop_atr x ATR. Target = entry + target_r x (entry - stop),
-    or entry x (1 + target_pct). If neither is hit within `window` days, sell at that day's close.
-    A gap through a level fills at the open; a day that touches both levels counts as the stop.
+    or entry x (1 + target_pct), or none. trail_atr: the stop follows the highest close since the entry
+    (highest close - trail_atr x ATR, never below the first stop). If no level is hit within `window` days,
+    sell at that day's close. A gap through a level fills at the open; a day that touches both counts as the stop.
     Returns y (1 = target first), ret (after costs), r (result in multiples of the risk), days,
     kind (1 target, -1 stop, 0 time) and spy (S&P 500 over the same days). NaN = cannot be judged."""
     P, N = len(positions), O.shape[1]
@@ -93,25 +96,38 @@ def simulate_trades(O: np.ndarray, H: np.ndarray, L: np.ndarray, C: np.ndarray, 
             e, a = O[p + 1], atr[p]
             risk = stop_atr * a
             stop = e - risk
-            tgt = e + target_r * risk if target_r else e * (1 + float(target_pct))
+            if target_r:
+                tgt = e + target_r * risk
+            elif target_pct:
+                tgt = e * (1 + float(target_pct))
+            else:
+                tgt = np.full(N, np.inf)
             sl = slice(p + 1, p + 1 + window)
             hw, lw, ow = H[sl], L[sl], O[sl]
-            ht, hs = hw >= tgt, lw <= stop
+            if trail_atr:   # the stop level of each day uses the closes up to the day before
+                cw = C[sl]
+                cm = np.fmax.accumulate(np.where(np.isnan(cw), -np.inf, cw), axis=0)
+                prev = np.vstack([e[None, :], np.fmax(e[None, :], cm[:-1])])
+                level = np.maximum(stop[None, :], prev - trail_atr * a[None, :])
+            else:
+                level = np.broadcast_to(stop, lw.shape)
+            ht, hs = hw >= tgt, lw <= level
             ft = np.where(ht.any(0), ht.argmax(0), window)
             fs = np.where(hs.any(0), hs.argmax(0), window)
             hit_t = ft < fs                                   # same day as the stop -> counted as the stop
             hit_s = (fs <= ft) & (fs < window)
             ftc, fsc = np.minimum(ft, window - 1), np.minimum(fs, window - 1)
-            o_t, o_s = ow[ftc, cols], ow[fsc, cols]
+            o_t, o_s, lv = ow[ftc, cols], ow[fsc, cols], level[fsc, cols]
             px_t = np.where(o_t >= tgt, o_t, tgt)             # opened above the target: sold at the open
-            px_s = np.where((fsc > 0) & (o_s <= stop), o_s, stop)  # opened below the stop: sold at the open
+            px_s = np.where((fsc > 0) & (o_s <= lv), o_s, lv)  # opened below the stop: sold at the open
             last = pd.DataFrame(C[sl]).ffill().to_numpy()[-1]
             exit_px = np.where(hit_t, px_t, np.where(hit_s, px_s, last))
             held = np.where(hit_t, ftc + 1, np.where(hit_s, fsc + 1, window)).astype(int)
             c = cost[i] if np.ndim(cost) == 2 else cost   # one cost per stock (spread depends on liquidity)
             ret = exit_px / e - 1 - c
             bad = np.isnan(e) | np.isnan(a) | ~(a > 0) | ~(stop > 0) | np.isnan(exit_px)
-            row = {"cost": np.broadcast_to(np.asarray(c, dtype=float), ret.shape), "y": hit_t.astype(float), "ret": ret, "r": ret * e / risk, "days": held.astype(float),
+            row = {"cost": np.broadcast_to(np.asarray(c, dtype=float), ret.shape), "y": hit_t.astype(float), "ret": ret,
+                   "r": ret * e / risk, "days": held.astype(float),
                    "kind": np.where(hit_t, 1.0, np.where(hit_s, -1.0, 0.0))}
             if spy_open is not None and spy_close is not None:
                 row["spy"] = spy_close[np.minimum(p + held, len(spy_close) - 1)] / spy_open[p + 1] - 1
@@ -120,6 +136,38 @@ def simulate_trades(O: np.ndarray, H: np.ndarray, L: np.ndarray, C: np.ndarray, 
                 v[bad] = np.nan
                 out[k][i] = v
     return out
+
+
+# ------------------------------------------------------------------ exit plans
+# The tested plan (from config.yaml) always competes; the others are fixed in advance, so they cannot be tuned
+# to the test period. Each one: stop (x ATR), target (x the risk, None = no target), holding days, trailing stop.
+EXIT_PLANS = [
+    {"key": "wide", "stop_atr": 4.0, "target_r": 2.0, "window": 63, "trail_atr": None,
+     "he": "סטופ רחוק (4 תנודות), יעד פי 2 מהסיכון, עד 3 חודשים"},
+    {"key": "trail", "stop_atr": 2.5, "target_r": None, "window": 63, "trail_atr": 3.0,
+     "he": "סטופ נגרר: 3 תנודות מתחת לשיא, בלי יעד, עד 3 חודשים"},
+    {"key": "hold", "stop_atr": 5.0, "target_r": None, "window": 63, "trail_atr": None,
+     "he": "בלי יעד, סטופ חירום רחוק (5 תנודות), יציאה אחרי 3 חודשים"},
+    {"key": "month", "stop_atr": 2.5, "target_r": 3.0, "window": 21, "trail_atr": None,
+     "he": "סטופ 2.5 תנודות, יעד פי 3, יציאה אחרי חודש"},
+]
+
+
+def base_plan(settings) -> dict:
+    """The plan in config.yaml (the one the model is trained on)."""
+    k = float(settings.get("risk.atr_stop_multiple"))
+    tr = float(settings.get("risk.target_r") or 0) or None
+    w = int(settings.get("train.horizon_days") or 63)
+    return {"key": "base", "stop_atr": k, "target_r": tr, "window": w, "trail_atr": None,
+            "he": f"סטופ {k:g} תנודות, יעד פי {tr:g} מהסיכון, עד {round(w / 21)} חודשים" if tr else
+                  f"סטופ {k:g} תנודות, עד {round(w / 21)} חודשים"}
+
+
+def per_month(st: dict | None) -> float | None:
+    """Result per month of invested money: average trade / average days held x 21 trading days."""
+    if not st or st.get("ret") is None or not st.get("days"):
+        return None
+    return st["ret"] / st["days"] * 21
 
 
 def trade_costs(dollar_volume: np.ndarray, base: float) -> np.ndarray:
@@ -410,6 +458,32 @@ def train_model(settings, demo: bool = False, out_path: Path | None = None) -> d
         al = trade_stats(g) or {}
         by_year.append({"year": int(yr), "top": tp.get("hit"), "base": al.get("hit"), "top_ret": tp.get("ret"),
                         "base_ret": al.get("ret"), "spy": al.get("spy"), "n": int(len(g))})
+    # exit plans: the same top picks under each plan; chosen on period A, adopted only if better in the final check too
+    plan, exit_plans, sim_chosen, row_of, col_of, sub = _exit_tournament(
+        settings, cfg, T, sel_pos, fin_pos, top_n, positions, cost_m, O, H, L, C[cols].to_numpy(dtype=float), atr,
+        spy_o, spy_c, cols, target_pct)
+
+    def plan_stats(rows):
+        ii = rows["pos"].map(row_of).to_numpy()
+        jj = rows["ticker"].map(col_of).to_numpy()
+        ok_ = ~np.isnan(ii.astype(float))
+        ii, jj = ii[ok_].astype(int), jj[ok_].astype(int)
+        df = pd.DataFrame({k2: sim_chosen[k2][ii, jj] for k2 in ("y", "ret", "r", "days", "kind", "spy", "cost")})
+        return trade_stats(df.dropna(subset=["ret"]))
+
+    # where a stock stands among all stocks of the same day (what the daily scan uses), under the chosen plan
+    TT = T[T["pos"].isin(sub)].copy()
+    TT["rk"] = TT.groupby("pos")["p"].rank(pct=True, method="first")
+    rank_deciles = []
+    for i in range(10):
+        lo, hi = i / 10, (i + 1) / 10
+        st = plan_stats(TT[(TT["rk"] > lo) & (TT["rk"] <= hi)]) or {}
+        rank_deciles.append({"lo": lo, "hi": hi, "rate": st.get("hit"), "ret": st.get("ret"), "stop": st.get("stop"),
+                             "win": st.get("win"), "r": st.get("r"), "n": st.get("n", 0)})
+    band = {"frac": float(min(0.1, top_n / max(1.0, float(T.groupby("pos").size().mean())))),
+            "sel": plan["sel"], "fin": plan["fin"], "all_fin": plan.get("all_fin")}
+    log.info("רמת הבחירה: %.1f%% המובילות בכל יום. תוכנית היציאה שנבחרה: %s", 100 * band["frac"], plan["he"])
+
     # the self-review's lessons: for every situation it watches, would skipping it have improved the top picks?
     thresholds = selfreview.compute_thresholds(D)
     lesson_tests = selfreview.test_lessons(T, sel_pos, fin_pos, "p", top_n, thresholds)
@@ -427,7 +501,7 @@ def train_model(settings, demo: bool = False, out_path: Path | None = None) -> d
         "money_sel": {"model": chosen["sel"], "tech": base_stats["sel"]["tech"], "all": base_stats["sel"]["all"]},
         "money_all": trade_stats(T), "candidates": candidates, "edge_sel": edge_sel, "edge_fin": edge_fin,
         "passed": passed, "sel_start": sel_d[0], "sel_end": sel_d[1], "test_start": fin_d[0], "test_end": fin_d[1],
-        "deciles": deciles, "by_year": by_year,
+        "deciles": deciles, "by_year": by_year, "rank_deciles": rank_deciles, "band": band, "exit_plans": exit_plans,
     }
     log.info("נבחר: %s. בדיקה סופית (%s עד %s): %d המובילות %+.2f%% לעסקה מול %+.2f%% לכל המניות. %s",
              KIND_HE[kind], fin_d[0], fin_d[1], top_n, 100 * (chosen["fin"].get("ret") or 0),
@@ -453,12 +527,62 @@ def train_model(settings, demo: bool = False, out_path: Path | None = None) -> d
         calibration={"a": float(cal[0]), "b": float(cal[1])}, validation=validation,
         what_worked=_what_worked(D, max(100, len(D) // 400)), coverage=coverage,
         labels={k2: LABELS_HE[k2] for k2 in FEATURES}, industry_map=peers.sic,
-        thresholds=thresholds, lesson_tests=lesson_tests,
+        thresholds=thresholds, lesson_tests=lesson_tests, plan=plan, train_rev=TRAIN_REV,
     )
     model = ProbModel(meta)
     if out_path:
         model.save(Path(out_path))
     return meta
+
+
+def _exit_tournament(settings, cfg, T, sel_pos, fin_pos, top_n, positions, cost_m, O, H, L, Cn, atr, spy_o, spy_c,
+                     cols, target_pct):
+    """Replays the model's top picks of every week under each exit plan. The plan with the best result per month of
+    invested money in period A wins, and it replaces the plan in config.yaml only if it also beats it in the final
+    check (period B) by at least 0.2% a month, with a positive average trade. Returns the chosen plan, all plans and the chosen replay."""
+    plans = [base_plan(settings)]
+    if target_pct:
+        plans[0].update(target_r=None, target_pct=float(target_pct))
+    if cfg.get("exit_tournament", True):
+        plans += [dict(p_) for p_ in EXIT_PLANS]
+    pidx = {int(p_): i for i, p_ in enumerate(positions)}
+    sub = [int(p_) for p_ in sorted(set(map(int, sel_pos)) | set(map(int, fin_pos))) if int(p_) in pidx]
+    cost_sub = cost_m[[pidx[p_] for p_ in sub]]
+    row_of = {p_: i for i, p_ in enumerate(sub)}
+    col_of = {t: j for j, t in enumerate(cols)}
+    Ta, Tb = T[T["pos"].isin(sel_pos)], T[T["pos"].isin(fin_pos)]
+    top_a, top_b = _top(Ta, "p", top_n), _top(Tb, "p", top_n)
+
+    def stats_for(sim, rows):
+        ii = rows["pos"].map(row_of).to_numpy(dtype=float)
+        jj = rows["ticker"].map(col_of).to_numpy(dtype=float)
+        ok = ~np.isnan(ii) & ~np.isnan(jj)
+        ii, jj = ii[ok].astype(int), jj[ok].astype(int)
+        df = pd.DataFrame({k: sim[k][ii, jj] for k in ("y", "ret", "r", "days", "kind", "spy", "cost")})
+        return trade_stats(df.dropna(subset=["ret"]))
+
+    sims = {}
+    for pl in plans:
+        sim = simulate_trades(O, H, L, Cn, atr, sub, int(pl["window"]), float(pl["stop_atr"]), pl.get("target_r"),
+                              pl.get("target_pct"), cost_sub, spy_o, spy_c, pl.get("trail_atr"))
+        sims[pl["key"]] = sim
+        pl["sel"], pl["fin"], pl["all_fin"] = stats_for(sim, top_a), stats_for(sim, top_b), stats_for(sim, Tb)
+        pl["sel_month"], pl["fin_month"] = per_month(pl["sel"]), per_month(pl["fin"])
+        log.info("תוכנית יציאה '%s': תקופה א׳ %+.2f%% לחודש מושקע, בדיקה סופית %+.2f%%", pl["he"],
+                 100 * (pl["sel_month"] or 0), 100 * (pl["fin_month"] or 0))
+    base = plans[0]
+    best = max(plans, key=lambda p_: p_["sel_month"] if p_["sel_month"] is not None else -9)
+    chosen = base
+    # a clear margin in the final check (0.2% a month), not a tie decided by chance
+    if best is not base and (best["fin_month"] or -9) >= (base["fin_month"] or -9) + 0.002 \
+            and ((best["fin"] or {}).get("ret") or 0) > 0:
+        chosen = best
+    for pl in plans:
+        pl["chosen"] = pl is chosen
+        pl["best_sel"] = pl is best
+    plan = {k: chosen.get(k) for k in ("key", "stop_atr", "target_r", "target_pct", "window", "trail_atr", "he", "sel",
+                                       "fin", "all_fin", "sel_month", "fin_month")}
+    return plan, plans, sims[chosen["key"]], row_of, col_of, sub
 
 
 def _fit_candidate(kind: str, X: np.ndarray, y: np.ndarray, rx: np.ndarray, lam_k: float) -> dict:

@@ -74,16 +74,18 @@
     back: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>',
     cal: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="4" y="5" width="16" height="15" rx="2"/><path d="M4 10h16M9 3v4M15 3v4"/></svg>',
     refresh: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 5v6h-6"/></svg>',
+    results: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 20h18"/><path d="M4 16l5-5 4 3 7-8"/><path d="M15 6h5v5"/></svg>',
     learn: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 18h5M10.5 21h3"/><path d="M12 3a6 6 0 0 0-3.7 10.7c.7.6 1.2 1.4 1.2 2.3h5c0-.9.5-1.7 1.2-2.3A6 6 0 0 0 12 3z"/><path d="M12 7.5v3l1.8 1.2"/></svg>',
     help: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M9.6 9.4a2.5 2.5 0 0 1 4.9.8c0 1.6-2.5 2.2-2.5 3.7"/><circle cx="12" cy="17.2" r="1" fill="currentColor" stroke="none"/></svg>',
   };
-  const APP_VERSION = 6;  // shown once: what is new in this version
+  const APP_VERSION = 8;  // shown once: what is new in this version
   const RADAR_MARK = '<svg class="radar-mark" viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="14" style="fill:var(--accent-soft)"/><circle cx="16" cy="16" r="14" fill="none" style="stroke:var(--accent)" stroke-width="1.5"/><circle cx="16" cy="16" r="8.5" fill="none" style="stroke:var(--accent)" stroke-width="1" opacity=".55"/><path d="M16 16L16 2A14 14 0 0 1 28.1 9z" style="fill:var(--accent)" opacity=".35"/><path d="M16 16L28.1 9" style="stroke:var(--accent)" stroke-width="1.6" stroke-linecap="round"/><circle cx="21.5" cy="11.5" r="2" style="fill:var(--good)"/></svg>';
 
   // ------------------------------------------------------------------ state
   const state = {
     tab: 'today', data: null, demo: false, status: null, index: null, viewing: null, loading: true,
-    backtest: undefined, model: undefined, review: undefined, pmAll: false, pmShow: 'all', tickers: undefined, search: '', searchMsg: null, job: store.get('job'),
+    backtest: undefined, model: undefined, review: undefined, pmAll: false, pmShow: 'all', tickers: undefined,
+    view: store.get('view', 'simple'),   // simple = only the picks, the four things that matter and radar vs. the S&P 500 search: '', searchMsg: null, job: store.get('job'),
     installEvt: null, sheet: null,
   };
 
@@ -284,6 +286,10 @@
     } else if (st && st.ok && st.mode === 'train' && daysSince(st.finished) < 1) {
       out.push(banner('good', 'מודל הסיכוי אומן ונבדק', st.message));
     }
+    const deg = (state.data && state.data.degraded) || [];
+    if (deg.length && !state.demo) {
+      out.push(banner('warn', 'הסריקה חלקית', `${deg.join('. ')}. הבחירות מוצגות, אבל לא נפתחו עסקאות חדשות בתיק הנייר, והמערכת תנסה שוב בריצת הגיבוי של הבוקר.`));
+    }
     if (state.viewing) {
       out.push(banner('warn', `מוצגת הסריקה מ־${dmy(state.viewing)}`, '', '<div style="margin-top:6px"><button class="btn small ghost" data-act="today-latest">חזרה לסריקה האחרונה</button></div>'));
     }
@@ -305,8 +311,28 @@
     if (isPctRule(r)) return `סיכוי לעלות ${pct(rulePct(r))} לפני הסטופ`;
     return 'סיכוי להגיע ליעד לפני הסטופ';
   }
+  const bandFrac = () => { const d = state.data || {}; return d.band_frac || (d.model && d.model.band_frac) || null; };
+  // the model's expected result per trade (what stocks at the same place in its ranking did in the test,
+  // corrected by what really happened to my own recommendations since), against all stocks
+  function expLine(r) {
+    const h = r.prob_hist, lv = r.prob_live || {};
+    const exp = isNum(lv.ret_adj) ? lv.ret_adj : (h && isNum(h.ret) ? h.ret : null);
+    if (!isNum(exp) || !isNum(r.exp_base)) return '';
+    const diff = exp - r.exp_base;
+    const tone = diff >= 0.005 ? 'good' : diff <= -0.005 ? 'bad' : '';
+    const mx = Math.max(0.01, Math.abs(exp), Math.abs(r.exp_base)) * 1.15;
+    const w = (Math.max(0, exp) / mx) * 100, bw = (Math.max(0, r.exp_base) / mx) * 100;
+    const bf = bandFrac();
+    const where = h && h.band && bf ? `בין ${pct(bf, 1)} המובילות של המודל · ` : isNum(r.model_pct) ? `במקום ה־${pct(1 - r.model_pct, 0)} העליונים בדירוג · ` : '';
+    return `<div class="prob ${tone}" role="img" aria-label="תוצאה צפויה לעסקה ${pct(exp, 1, true)} לעומת ${pct(r.exp_base, 1, true)} לכל המניות">
+      <div class="prob-top"><span>תוצאה צפויה לעסקה</span><b class="num">${pct(exp, 1, true)}</b></div>
+      <div class="prob-track"><i style="width:${w.toFixed(1)}%"></i><span class="base" style="inset-inline-start:${bw.toFixed(1)}%"></span></div>
+      <div class="prob-sub">${where}כל המניות ${pct(r.exp_base, 1, true)}${isNum(r.prob) && r.plan && r.plan.target ? ` · הגיעו ליעד ${pct(r.prob)}` : ''}</div></div>`;
+  }
   // chance (from the tested model) that the stock reaches its target before its stop is hit
   function probLine(r) {
+    const e = expLine(r);
+    if (e) return e;
     if (!isNum(r.prob) || !isNum(r.prob_base) || !r.prob_base) return '';
     const ratio = r.prob / r.prob_base;
     const tone = ratio >= 1.3 ? 'good' : ratio <= 0.7 ? 'bad' : '';
@@ -327,12 +353,14 @@
   const MIN_CLOSED = 20;
   const N = (x) => `<span class="num">${esc(x)}</span>`;   // isolated number / Latin name inside Hebrew text
   const SPX = N('S&P 500');
+  // proven = the model passed its test AND, a month after each recommendation, at least 20 of its picks did clearly
+  // better than the stocks it checked and did not pick, and better than the S&P 500 over the same days
   function trustState(d) {
     const m = (d && d.model) || null;
-    const p = (d && d.paper) || {};
-    if (!m || !m.passed) return 'unproven';
-    const beats = isNum(p.return_on_invested) && isNum(p.spy_ret) && p.return_on_invested > p.spy_ret;
-    return (p.closed || 0) >= MIN_CLOSED && beats ? 'proven' : 'tested';
+    const rv = (d && d.review) || {};
+    if (!m || !m.passed || rv.drift === 'bad') return 'unproven';
+    const beatsSpy = isNum(rv.pick_ret) && isNum(rv.pick_spy) && rv.pick_ret > rv.pick_spy;
+    return (rv.graded || 0) >= MIN_CLOSED && rv.verdict === 'good' && beatsSpy ? 'proven' : 'tested';
   }
   function modelSpy(m) {
     if (m && isNum(m.spy_ret)) return m.spy_ret;
@@ -350,7 +378,7 @@
   }
   function paperLine(p) {
     if (!p || !p.n) return 'תיק הנייר עוד ריק. הוא מתחיל לעקוב אחרי הבחירות מהסריקה הבאה.';
-    const closedTxt = (p.closed || 0) >= MIN_CLOSED ? `נסגרו ${N(p.closed)} עסקאות.` : `נסגרו ${N(p.closed || 0)} מתוך ${N(MIN_CLOSED)} העסקאות שצריך כדי לשפוט.`;
+    const closedTxt = `נסגרו ${N(p.closed || 0)} עסקאות, ${N(p.open || 0)} פתוחות.`;
     return `תיק הנייר: ${N(pct(p.return_on_invested, 1, true))} מאז ${N(dm(p.since))}${isNum(p.spy_ret) ? `, ${SPX} באותה תקופה ${N(pct(p.spy_ret, 1, true))}` : ''}. ${closedTxt}`;
   }
   function reviewLine(rb) {
@@ -379,11 +407,12 @@
     const st = trustState(d);
     const m = d.model || null;
     if (m && !isNum(m.spy_ret) && state.model === undefined) loadModel();
-    const head = st === 'proven' ? 'יש יתרון בבדיקה ההיסטורית וגם בתיק הנייר'
-      : st === 'tested' ? 'המודל עבר בדיקה, תיק הנייר עוד קצר'
-        : 'המערכת עוד לא הוכיחה יתרון על המדד';
+    const rvb = d.review || {};
+    const head = st === 'proven' ? 'יש יתרון בבדיקה ההיסטורית וגם בהמלצות בפועל'
+      : st === 'tested' ? 'המודל עבר בדיקה, ההמלצות בפועל עוד נבדקות'
+        : rvb.drift === 'bad' ? 'המודל מצליח בפועל פחות מבבדיקה' : 'המערכת עוד לא הוכיחה יתרון על המדד';
     const bottom = st === 'proven' ? 'גם יתרון מוכח לא מבטיח את העסקה הבאה: כל כניסה עם סטופ וכמות לפי החישוב.'
-      : st === 'tested' ? `עדיף להמשיך בתיק הנייר עד ${MIN_CLOSED} עסקאות סגורות לפני שסומכים על הרשימה.`
+      : st === 'tested' ? `עדיף לעקוב בתיק הנייר עד ש־${MIN_CLOSED} בחירות לפחות ייבדקו חודש אחרי ההמלצה${rvb.next_check && !rvb.graded ? ` (הבדיקה הראשונה בסביבות ${dm(rvb.next_check)})` : ''}, ורק אז לסמוך על הרשימה.`
         : 'לכן: רשימה לבדיקה ולתיק נייר, לא לקנייה בכסף אמיתי.';
     const issues = dataIssues(d);
     return `<section class="card trust ${st === 'proven' ? 'good' : 'warn'}" aria-label="האם לסמוך על הרשימה">
@@ -395,7 +424,7 @@
   }
   function whatsNew() {
     if (state.demo || PREVIEW || !state.data || store.get('seen', 0) >= APP_VERSION) return '';
-    return banner('info', 'חדש בגרסה הזו: ביקורת עצמית', 'המערכת בודקת את ההמלצות של עצמה: איפה צדקה, איפה טעתה ולמה. אות שמטעה מקבל פחות משקל, דפוס הפסד שחוזר הופך ללקח רק אחרי שגם 5 שנות היסטוריה מאשרות אותו, והסיכוי שמוצג מתוקן לפי מה שקרה בפועל. הכול בלשונית למידה.',
+    return banner('info', 'חדש: תצוגה פשוטה', 'במסך רק המניות של היום, ובכל אחת ארבעה דברים: פוטנציאל, סיכון, הסיבות והסטופ. למעלה – האם הרדאר מנצח את S&P 500. מאחורי הקלעים המודל שעבר את הבדיקה בוחר את המניות מכל השוק. כל המסכים הקודמים נמצאים ב"תצוגה מלאה" ובהגדרות.',
       '<div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap"><button class="btn small" data-act="guide">איך קוראים את המסך</button><button class="btn small ghost" data-act="seen">הבנתי</button></div>');
   }
 
@@ -545,7 +574,8 @@
       <div class="chips"><span class="chip ${rc}">סיכון <b>${Math.round(r.risk)}</b> · ${rl}</span>
         <span class="chip">מחיר <b class="num">${price(r.price)}</b></span>
         ${r.plan && r.plan.stop ? `<span class="chip">סטופ <b class="num">${price(r.plan.stop)}</b></span>` : ''}
-        ${r.plan && r.plan.target ? `<span class="chip">יעד <b class="num">${price(r.plan.target)}</b></span>` : ''}</div>
+        ${r.plan && r.plan.target ? `<span class="chip">יעד <b class="num">${price(r.plan.target)}</b></span>` : ''}
+        ${r.plan && r.plan.trail_atr ? `<span class="chip">סטופ נגרר <b class="num">${pct(r.plan.trail_pct, 0)}</b> מתחת לשיא</span>` : ''}</div>
       <div class="chips">${checkChip(r, scanDate)}${r.deal ? `<span class="chip warn">${esc(r.deal.short)}</span>` : ''}</div>
     </article>`;
   }
@@ -553,6 +583,7 @@
   function viewToday() {
     const d = state.data;
     if (state.loading) return loader();
+    if (d && state.view === 'simple') return viewTodaySimple(d);
     if (!d) {
       return `<div class="stack">${statusBanners()}<div class="card empty"><div class="loader" style="padding:16px 0"><div class="sweep"></div></div>
         <h3>הסריקה הראשונה עוד לא הסתיימה</h3>
@@ -576,7 +607,8 @@
         ${hot.map((t) => `<button class="pill warn" data-tab="market"><span class="sw"></span>${esc(t.he)} · פי ${t.ratio.toFixed(1)}</button>`).join('')}
       </div>
       <div class="section-title"><h2>${trusted ? 'המניות שנבחרו' : 'מועמדות לבדיקה'}</h2><span class="muted small">${picks.length} מתוך ${d.counts ? d.counts.deep : res.length} שנבדקו לעומק</span></div>
-      ${picks.length ? picks.map(([r, i]) => pickCard(r, i, d.date)).join('') : '<div class="card empty">אף מניה לא עברה היום את סף הפוטנציאל והסיכון. זה תקין – לפעמים הדבר הנכון הוא לחכות.</div>'}
+      ${d.pick_mode === 'model' ? `<p class="muted small" style="margin:-6px 0 0">המודל דירג את כל המניות שעברו את מסנני הנזילות. הבחירות הן המובילות שלו${isNum(d.band_frac) ? ` (מתוך ${pct(d.band_frac, 1)} העליונים)` : ''} שיש להן גם פוטנציאל ${N(60)} ומעלה, אחרי פסילה של סיכון גבוה ועסקאות רכישה, ועד ${N(3)} מאותו ענף.</p>` : ''}
+      ${picks.length ? picks.map(([r, i]) => pickCard(r, i, d.date)).join('') : '<div class="card empty">אף מניה לא עברה היום את הסינון. זה תקין – לפעמים הדבר הנכון הוא לחכות.</div>'}
       ${excluded.length ? `<div class="section-title"><h2>סוננו היום</h2><span class="muted small">היו עוברות את הסף, אבל לא מתאימות</span></div>
       <div class="card rows">${excluded.map(([r, i]) => `<button class="row" data-open="${i}"><span class="score-chip">${Math.round(r.upside)}</span>
         <span class="grow"><span class="tk">${esc(r.ticker)}</span><span class="nm">${esc(r.name)}</span></span>
@@ -586,6 +618,123 @@
         <span class="grow"><span class="tk">${esc(r.ticker)}</span><span class="nm">${esc(r.name)}</span></span>
         <span class="chip ${riskLevel(r.risk)[0]}">סיכון ${Math.round(r.risk)}</span></button>`).join('')}</div>` : ''}
       <p class="muted small" style="text-align:center">סריקה מ־${dmy(d.date)} · נסרקו ${d.counts ? d.counts.universe : '–'} מניות, ${d.counts ? d.counts.screened : '–'} עברו את מסנני הנזילות<br>כלי עזר למחקר, לא ייעוץ השקעות.</p>
+    </div>`;
+  }
+
+  // ------------------------------------------------------------------ simple view
+  // The radar answers one question: which stocks have the most signs pointing up today (not: will it rise).
+  // On each card: potential, risk, the reasons in words, and the stop. Above: does the radar beat the S&P 500?
+  function scoreboard(d) {
+    const rv = d.review || {};
+    const p = d.paper || {};
+    const lines = [];
+    let head, tone;
+    const n = rv.graded || 0;
+    if (n > 0 && isNum(rv.pick_ret) && isNum(rv.pick_spy)) {
+      const beat = rv.pick_ret > rv.pick_spy;
+      const clear = beat && rv.verdict === 'good';
+      head = n < MIN_CLOSED ? 'עוד מוקדם לשפוט' : clear ? 'הרדאר מנצח את המדד' : beat ? 'הרדאר לפני המדד, אבל עוד לא בבירור' : 'הרדאר לא מנצח את המדד';
+      tone = n < MIN_CLOSED ? 'warn' : clear ? 'good' : beat ? 'warn' : 'bad';
+      lines.push(`חודש אחרי כל המלצה: הבחירות ${N(pct(rv.pick_ret, 1, true))} בממוצע, ${SPX} באותם ימים ${N(pct(rv.pick_spy, 1, true))} (${N(n)} בחירות${n < MIN_CLOSED ? `, צריך לפחות ${N(MIN_CLOSED)}` : ''}).`);
+    } else {
+      head = 'עוד אין תוצאות להשוואה';
+      tone = 'warn';
+      lines.push(`כל המלצה נבדקת חודש אחרי, מול ${SPX} באותם ימים.${rv.next_check ? ` הבדיקה הראשונה בסביבות ${N(dm(rv.next_check))}.` : ''}`);
+    }
+    if (p.n) lines.push(`תיק הנייר: ${N(pct(p.return_on_invested, 1, true))} מאז ${N(dm(p.since))}${isNum(p.spy_ret) ? `, ${SPX} באותה תקופה ${N(pct(p.spy_ret, 1, true))}` : ''}.`);
+    const bottom = tone === 'good' ? 'גם יתרון מוכח לא מבטיח את העסקה הבאה. תמיד עם סטופ.'
+      : tone === 'bad' ? 'כל עוד זה המצב, אין לרדאר יתרון ועדיף מדד כמו IVV. הרשימה רק לתרגול.'
+        : 'עד אז: רק סכומים קטנים לתרגול, או תיק הנייר.';
+    return `<section class="card trust ${tone === 'good' ? 'good' : 'warn'}" aria-label="הרדאר מול S&P 500">
+      <div class="trust-head"><span class="dot"></span><h3>הרדאר מול ${SPX}: ${esc(head)}</h3></div>
+      <ul class="trust-list">${lines.map((x) => `<li>${x}</li>`).join('')}</ul>
+      <p class="trust-bottom">${esc(bottom)}</p></section>`;
+  }
+  function simpleCard(r, i, scanDate) {
+    const [rc, rl] = riskLevel(r.risk);
+    const pl = r.plan || {};
+    const pros = (r.pros || []).slice(0, 3);
+    return `<article class="card scard" role="button" tabindex="0" data-open="${i}" aria-label="${esc(r.ticker)} ${esc(r.name)}">
+      <div class="s-head"><span class="tk">${esc(r.ticker)}</span><span class="nm">${esc(r.name)}</span></div>
+      <div class="s-nums">
+        <div class="s-num"><span class="eyebrow">פוטנציאל</span><b class="num">${Math.round(r.upside)}</b><span class="muted small">מתוך 100</span></div>
+        <div class="s-num ${rc}"><span class="eyebrow">סיכון</span><b>${rl}</b><span class="muted small">${Math.round(r.risk)} מתוך 100</span></div>
+        <div class="s-num"><span class="eyebrow">סטופ</span><b class="num">${price(pl.stop)}</b><span class="muted small">${isNum(pl.stop_pct) ? `${pct(-pl.stop_pct, 0)} מתחת למחיר` : ''}</span></div>
+      </div>
+      ${pros.length ? `<ul class="pick-reasons">${pros.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}
+      <div class="chips">${checkChip(r, scanDate)}${r.deal ? `<span class="chip warn">${esc(r.deal.short)}</span>` : ''}</div>
+    </article>`;
+  }
+  function viewTodaySimple(d) {
+    const res = d.results || [];
+    const picks = res.map((r, i) => [r, i]).filter(([r]) => r.pick);
+    return `<div class="stack">
+      ${statusBanners()}${whatsNew()}${scoreboard(d)}
+      <div class="section-title"><h2>המניות של היום</h2><span class="muted small">${dmy(d.date)}</span></div>
+      <p class="muted small" style="margin:-6px 0 0">הרדאר מראה אצל אילו מניות יש היום הכי הרבה סימנים לעלייה – לא האם הן יעלו. כל מניה כאן כבר עברה את הסינון. מסתכלים על ארבעה דברים: פוטנציאל, סיכון, הסיבות והסטופ. בלי סטופ אין תוכנית.</p>
+      ${picks.length ? picks.map(([r, i]) => simpleCard(r, i, d.date)).join('') : '<div class="card empty">אף מניה לא עברה היום את הסינון. זה תקין – לפעמים הדבר הנכון הוא לחכות.</div>'}
+      <div class="s-actions"><button class="btn small ghost" data-act="view-full">תצוגה מלאה</button><button class="btn small ghost" data-act="guide">איך קוראים</button></div>
+    </div>`;
+  }
+  function viewDetailSimple() {
+    const { r, ctx } = state.sheet;
+    const [rc, rl] = riskLevel(r.risk);
+    const pl = r.plan || {};
+    const pros = r.pros || [];
+    const warn = (r.cons || []).slice(0, 3);
+    const facts = [['מחיר אחרון', price(r.price)], pl.stop ? ['סטופ', `${price(pl.stop)} (${pct(pl.stop_pct)})`] : null,
+      pl.target ? ['יעד', `${price(pl.target)} (${pct(pl.target_pct, 0, true)})`] : null,
+      ['יציאה לכל המאוחר', `אחרי ${pl.days || 63} ימי מסחר`]].filter(Boolean);
+    return `<div class="sheet-bar"><div class="topbar-in">
+        <button class="icon-btn" data-act="close" aria-label="חזרה">${ICON.back}</button>
+        <div class="brand"><h1 class="tk" style="font:600 19px/1 var(--font-data)">${esc(r.ticker)}</h1></div></div></div>
+      <div class="sheet-in">
+        ${ctx.demo ? banner('info', 'מניה בדויה (דמו)', 'כל הנתונים כאן לדוגמה בלבד.') : ''}
+        ${r.deal ? banner(r.exclude ? 'bad' : 'warn', r.exclude ? `${r.deal.short}: לא נבחרת` : r.deal.short, dealBody(r.deal)) : ''}
+        ${r.lesson ? banner('warn', 'לא נבחרה בגלל לקח שלמדתי', `${r.lesson.text}: בבדיקה העצמית מצאתי שמניות כאלה מפסידות אצלי.`) : ''}
+        <div class="d-head"><div class="grow"><div class="nm">${esc(r.name)}</div>
+          <div class="muted small">${esc([r.sector, r.industry].filter(Boolean).join(' · '))}</div>
+          <div class="price-line"><span class="px">${price(r.price)}</span></div></div></div>
+        <div class="card"><h3>ארבעת הדברים</h3>
+          <div class="s-item"><div class="s-k"><span>פוטנציאל</span><b class="num">${Math.round(r.upside)}</b></div>
+            <p>כמה סימנים מצביעים לעלייה ומסכימים ביניהם. 50 = ניטרלי. זה לא אחוז סיכוי.</p></div>
+          <div class="s-item"><div class="s-k"><span>סיכון</span><b class="${rc === 'bad' ? 'down' : rc === 'good' ? 'up' : ''}">${rl} (${Math.round(r.risk)})</b></div>
+            <p>כמה המניה קופצת ביום רגיל, ועד כמה יש אירועים קרובים כמו דוח רבעוני. סיכון גבוה אומר שגם הירידות יהיו חדות.</p></div>
+          <div class="s-item"><div class="s-k"><span>למה נבחרה</span></div>
+            ${pros.length ? `<ul class="list pros">${pros.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>` : '<p>אין סיבות מפורטות.</p>'}
+            <p class="muted small">סיבה שלא ברורה – שווה לשאול עליה ספציפית.</p></div>
+          <div class="s-item"><div class="s-k"><span>סטופ</span><b class="num">${price(pl.stop)}</b></div>
+            <p>המחיר שבו מודים שהרעיון לא עבד ויוצאים${isNum(pl.stop_pct) ? ` (${pct(-pl.stop_pct, 0)} מתחת למחיר)` : ''}. אם אפשר, שמים אותו כפקודה אצל הברוקר מיד אחרי הקנייה. אם לא – בודקים פעם ביום אחרי הסגירה.</p></div>
+        </div>
+        ${warn.length ? `<div class="card"><h3>שים לב</h3><ul class="list cons">${warn.map((x) => `<li>${esc(x)}</li>`).join('')}</ul></div>` : ''}
+        ${checklistCard(r, ctx)}
+        <div class="card"><h3>התוכנית</h3><p class="small" style="margin:2px 0 10px">${esc(planText(pl))}</p>
+          <div class="facts">${facts.map(([k, v]) => `<div class="fact"><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div></div>`).join('')}</div>
+          <p class="muted small" style="margin:10px 0 0">רושמים לעצמך: תאריך, מחיר קנייה וסטופ. אם המחיר יורד לסטופ – יוצאים, בלי להזיז אותו.</p></div>
+        <button class="btn ghost" data-act="detail-full">כל הפרטים והגרפים</button>
+        <p class="muted small">נותח ב־${dmy(ctx.date)} · כלי עזר למחקר, לא ייעוץ השקעות.</p>
+      </div>`;
+  }
+  function viewResults() {
+    const d = state.data;
+    if (!d) return state.loading ? loader() : '<div class="card empty">אין עדיין נתונים.</div>';
+    if (state.review === undefined) loadReview();
+    const rv = state.review;
+    const concl = rv ? (rv.conclusions || []).slice(0, 5) : [];
+    const p = d.paper || {};
+    const closed = (p.closed_positions || []).slice(0, 6);
+    const why = { stop: 'בסטופ', target: 'ביעד', time: 'בסוף הזמן' };
+    return `<div class="stack">
+      ${scoreboard(d)}
+      <div class="card"><h3>מה המערכת למדה</h3>
+        ${concl.length ? `<ul class="concl">${concl.map((x) => `<li class="${esc(x.tone)}">${esc(x.text)}</li>`).join('')}</ul>` : `<p class="muted">${rv === undefined ? 'טוען…' : 'עוד אין מסקנות.'}</p>`}
+        <button class="btn small ghost" style="margin-top:10px" data-act="open-learn">כל הפרטים</button></div>
+      <div class="card"><h3>תיק הנייר</h3>
+        <p class="muted small" style="margin:2px 0 8px">המערכת "קונה" את הבחירות שלה בלי כסף, עם סטופ, ועוקבת. ${N(p.open || 0)} פתוחות · ${N(p.closed || 0)} נסגרו.</p>
+        ${closed.length ? `<div class="rows">${closed.map((x) => `<div class="row" style="cursor:default"><span class="grow"><span class="tk">${esc(x.ticker)}</span>
+          <span class="nm">${dm(x.since)} עד ${dm(x.until)} · ${why[x.reason] || ''}</span></span><span class="chip ${x.ret >= 0 ? 'good' : 'bad'}"><b>${pct(x.ret, 1, true)}</b></span></div>`).join('')}</div>` : '<p class="muted small">עוד לא נסגרה אף עסקה.</p>'}
+      </div>
+      <div class="s-actions"><button class="btn small ghost" data-act="view-full">תצוגה מלאה</button></div>
     </div>`;
   }
 
@@ -681,6 +830,21 @@
       <p class="muted small" style="margin:6px 0 0">תקופה א׳ (${dmy(v.sel_start)}–${dmy(v.sel_end)}) שימשה רק לבחירת המודל. הבדיקה הסופית (${dmy(v.test_start)}–${dmy(v.test_end)}) לא שימשה לשום החלטה – לכן היא המדד האמיתי. עובר רק מודל שמנצח את כל המניות בשתיהן.</p></div>`;
   }
 
+  // exit plans: the model's same top picks under each plan (period A chooses, the final check confirms)
+  function exitPlans(md) {
+    const v = md.validation || {};
+    const ps = v.exit_plans || [];
+    if (!ps.length) return '';
+    const best = Math.max(0.002, ...ps.flatMap((x) => [Math.abs(x.sel_month || 0), Math.abs(x.fin_month || 0)]));
+    const row = (x) => `<div class="tour-row${x.chosen ? ' chosen' : ''}"><div class="tour-name">${esc(x.he)}${x.chosen ? ' <span class="chip good">בשימוש</span>' : ''}</div>
+      <div class="tour-vals"><span>תקופה א׳ <b class="${(x.sel_month || 0) > 0 ? 'up' : 'down'}">${pct(x.sel_month, 1, true)}</b></span><span>בדיקה סופית <b class="${(x.fin_month || 0) > 0 ? 'up' : 'down'}">${pct(x.fin_month, 1, true)}</b></span></div>
+      <div class="tour-bar"><i style="width:${Math.min(100, Math.abs(x.fin_month || 0) / best * 100).toFixed(0)}%;background:${(x.fin_month || 0) > 0 ? 'var(--good)' : 'var(--bad)'}"></i></div>
+      ${x.fin ? `<div class="muted small">בבדיקה הסופית: עסקה ממוצעת ${pct(x.fin.ret, 1, true)} · ברווח ${pct(x.fin.win)} · החזקה ${Math.round(x.fin.days || 0)} ימי מסחר</div>` : ''}</div>`;
+    return `<div class="tour"><div class="eyebrow" style="margin:0 0 6px">תוכניות יציאה – רווח לחודש של כסף מושקע, על אותן מניות שהמודל בחר</div>
+      ${ps.map(row).join('')}
+      <p class="muted small" style="margin:6px 0 0">הבחירה נעשית בתקופה א׳ בלבד. תוכנית חדשה מחליפה את הקודמת רק אם ניצחה אותה גם בבדיקה הסופית, ב־0.2% לחודש לפחות. רווח לחודש = העסקה הממוצעת חלקי ימי ההחזקה, כי כסף שמשתחרר מוקדם עובד שוב.</p></div>`;
+  }
+
   function viewModel() {
     if (state.model === undefined) { loadModel(); return `<div class="card"><h3>מודל הסיכוי</h3><p class="muted">טוען…</p></div>`; }
     const run = cloudReady() ? '<button class="btn small ghost" data-run="train">אמן מחדש</button>' : '';
@@ -703,7 +867,8 @@
       .filter(([, x]) => isNum(x));
     const maxAbs = Math.max(0.01, ...rows.map(([, x]) => Math.abs(x)));
     const moneyRows = rows.map(([l, x]) => divRow(l, x / maxAbs, pct(x, 1, true))).join('');
-    const dec = v.deciles || [];
+    const byRank = (v.rank_deciles || []).length === 10;
+    const dec = byRank ? v.rank_deciles : (v.deciles || []);
     const rets = dec.map((d) => (isNum(d.ret) ? d.ret : 0));
     const maxPos = Math.max(0, ...rets), maxNeg = Math.max(0, ...rets.map((x) => -x));
     const posShare = maxPos + maxNeg > 0 ? (100 * maxPos) / (maxPos + maxNeg) : 100;
@@ -729,6 +894,7 @@
       ${outdated ? banner('info', 'מודל חדש בדרך', 'המודל השמור עונה על השאלה הקודמת, ולכן הוא לא בשימוש עד שהאימון החדש יסתיים.') : ''}
       ${passed ? '' : banner('warn', 'המודל לא עבר את הבדיקה', v.candidates ? 'כדי לעבור, המניות שהמודל בוחר צריכות להרוויח יותר מכל המניות גם בתקופת הבחירה וגם בבדיקה הסופית. זה לא קרה, ולכן הוא לא משפיע כרגע על הציונים. הוא יאומן מחדש לבד בעוד חודש.' : 'בשנים שהוא לא ראה, העסקאות שהוא בחר לא היו טובות מהממוצע (בכסף או באחוז ההצלחה), ולכן הוא לא משפיע כרגע על הציונים. הוא יאומן מחדש לבד בעוד חודש.')}
       ${tournament(md)}
+      ${exitPlans(md)}
       <p class="small" style="margin:0 0 8px">${question}</p>
       <p class="small" style="margin:0 0 10px">${v.candidates ? `הבדיקה הסופית: ${dmy(v.test_start)} עד ${dmy(v.test_end)} – תקופה שהמודל לא ראה ושלא שימשה גם לבחירה בין המודלים.` : `הבדיקה ההוגנת: המודל למד רק משנים מוקדמות, ונבדק על ${dmy(v.test_start)} עד ${dmy(v.test_end)} – תקופה שלא ראה.`} כל עסקה מדומה כמו שהיא הייתה קורה באמת: יעד, סטופ או יציאה אחרי 3 חודשים, כולל קפיצות במחיר, עמלות ומרווח קנייה־מכירה שגדל ככל שהמניה פחות נזילה.</p>
       ${rows.length ? `<div class="eyebrow" style="margin:4px 0 4px">עסקה ממוצעת לפי התוכנית${v.candidates ? ' – בדיקה סופית' : ''}</div>${divHead('הפסד', 'רווח')}${moneyRows}` : ''}
@@ -740,7 +906,7 @@
         ${isNum(mm.ret_2x_cost) ? `<span class="chip ${mm.ret_2x_cost > 0 ? '' : 'bad'}">גם עם עלויות כפולות: <b>${pct(mm.ret_2x_cost, 1, true)}</b></span>` : ''}
         ${isNum(v.auc) ? `<span class="chip">AUC <b class="num">${v.auc.toFixed(2)}</b></span>` : ''}</div>
       ${years.length ? `<div class="eyebrow" style="margin:4px 0 4px">שנה אחרי שנה: ${isNum(years[0].top_ret) ? 'עסקה ממוצעת של המובילות מול כל המניות' : 'המובילות מול הממוצע'}</div><div class="chips">${years.map(yearChip).join('')}</div>` : ''}
-      ${dec.length && dec.some((d) => isNum(d.ret)) ? `<div class="eyebrow" style="margin:14px 0 4px">10 קבוצות לפי הדירוג של המודל – עסקה ממוצעת בכל קבוצה (%)</div>
+      ${dec.length && dec.some((d) => isNum(d.ret)) ? `<div class="eyebrow" style="margin:14px 0 4px">10 קבוצות לפי ${byRank ? 'המקום בדירוג היומי של המודל' : 'הדירוג של המודל'} – עסקה ממוצעת בכל קבוצה (%)</div>
         <div class="dec2">${decBars}</div><div class="dec-axis"><span>דירוג נמוך</span><span>דירוג גבוה</span></div>
         <p class="muted small" style="margin:4px 0 0">אם המודל טוב, העמודות עולות מקבוצה לקבוצה. מניה שנופלת בקבוצה שהפסידה בממוצע לא נבחרת.</p>` : ''}
       ${good.length || bad.length ? `<div class="eyebrow" style="margin:14px 0 4px">מה עבד ב־5 השנים האחרונות (כל אחד לבד)</div>
@@ -783,6 +949,7 @@
   const WHY_NOT = {
     upside: 'ציון הפוטנציאל נמוך מהסף', risk: 'ציון הסיכון גבוה מהסף', edge: 'ברמת הסיכוי שלה עסקאות הפסידו בבדיקה',
     deal: 'בתהליך רכישה או פשיטת רגל', rank: 'לא נכנסה לרשימת המובילות',
+    band: 'לא בין המובילות של המודל היום', sector: 'כבר נבחרו 3 מניות מאותו ענף',
   };
   const LESSON_ST = {
     adopted: ['good', 'אומץ'], adopted_live: ['good', 'אומץ לפי התוצאות בפועל'], pending: ['warn', 'ממתין לבדיקה בהיסטוריה'],
@@ -796,7 +963,7 @@
   async function loadReview() {
     const rv = await getJSON(state.demo ? 'demo/review.json' : 'review.json');
     state.review = rv || null;
-    if (state.tab === 'learn') render();
+    if (state.tab === 'learn' || state.tab === 'results') render();
   }
   function reviewHow() {
     return `<div class="card"><h3>איך המערכת בודקת את עצמה</h3><ul class="list">
@@ -970,6 +1137,21 @@
     return out;
   }
 
+  function planText(pl) {
+    pl = pl || {};
+    const days = pl.days || 63;
+    const span = days <= 25 ? 'חודש' : days <= 45 ? 'חודשיים' : '3 חודשים';
+    const size = 'הכמות נקבעת כך שפגיעה בסטופ תעלה אחוז קבוע מהתיק.';
+    const chosen = state.data && state.data.plan && state.data.plan.key && state.data.plan.key !== 'base' ? ' התוכנית הזו נבחרה כי ניצחה את התוכנית הקודמת גם בבדיקה על היסטוריה.' : '';
+    if (pl.trail_atr) {
+      return `הסטופ מתחיל לפי התנודה הרגילה של המניה ועולה יחד עם המחיר: תמיד ${pl.trail_atr} תנודות יומיות מתחת למחיר הסגירה הגבוה ביותר מאז הכניסה. ${pl.target ? 'יש גם יעד.' : 'אין יעד – נותנים לרווח לרוץ.'} ${size} אם הסטופ לא נפגע תוך ${span} – יוצאים.${chosen}`;
+    }
+    if (!pl.target) {
+      return `סטופ חירום רחוק (${pl.stop_atr || 5} תנודות יומיות מתחת למחיר), בלי יעד. ${size} יוצאים אחרי ${span}.${chosen}`;
+    }
+    const rr = isNum(pl.target_pct) && isNum(pl.stop_pct) && pl.stop_pct ? Math.round(-pl.target_pct / pl.stop_pct * 10) / 10 : 3;
+    return `הסטופ נקבע לפי התנודה הרגילה של המניה (${pl.stop_atr || 2.5} תנודות יומיות ממוצעות), והיעד פי ${rr} מהמרחק לסטופ. ${size} אם לא הגיעה לאף אחד מהם תוך ${span} – יוצאים.${chosen}`;
+  }
   // the deal text starts with its own label ("בתהליך רכישה: ..."), which the banner title already shows
   const dealBody = (deal) => String(deal.text || '').replace(new RegExp('^' + String(deal.short || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*:\\s*'), '');
   function viewDetail() {
@@ -992,6 +1174,7 @@
       isNum(r.move_3m) ? ['תנודה טיפוסית ל־3 חודשים', `±${pct(r.move_3m)}`] : null,
       isNum(r.market_cap) ? ['שווי שוק', money(r.market_cap)] : null,
       r.earnings_date ? ['דוח רבעוני הבא', dmy(r.earnings_date)] : null,
+      isNum(r.model_pct) ? ['דירוג המודל היום', `${pct(Math.max(0.001, 1 - r.model_pct), 1)} העליונים`] : null,
     ].filter(Boolean);
     const links = !ctx.demo && /^[A-Z][A-Z0-9.\-]*$/.test(r.ticker) ? `<div class="links">
       <a class="btn small ghost" href="https://finance.yahoo.com/quote/${encodeURIComponent(r.ticker)}" target="_blank" rel="noopener">Yahoo Finance</a>
@@ -1021,7 +1204,7 @@
           ${plan.stop ? `<div class="legend" style="margin-top:6px"><span><i></i>מחיר</span><span><i class="dash" style="border-top-color:var(--bad)"></i>סטופ מוצע</span>${plan.target ? '<span><i class="dash" style="border-top-color:var(--good)"></i>יעד מוצע</span>' : ''}</div>` : ''}</div>
         ${(r.pros || []).length ? `<div class="card"><h3>למה נבחרה</h3><ul class="list pros">${r.pros.map((p) => `<li>${esc(p)}</li>`).join('')}</ul></div>` : ''}
         ${(r.cons || []).length ? `<div class="card"><h3>שים לב</h3><ul class="list cons">${r.cons.map((p) => `<li>${esc(p)}</li>`).join('')}</ul></div>` : ''}
-        <div class="card"><h3>תוכנית מוצעת</h3><p class="muted small" style="margin:2px 0 10px">הסטופ נקבע לפי התנודה הרגילה של המניה, והיעד פי 3 מהמרחק לסטופ. הכמות נקבעת כך שפגיעה בסטופ תעלה אחוז קבוע מהתיק. אם לא הגיעה לאף אחד מהם תוך 3 חודשים – יוצאים.</p>
+        <div class="card"><h3>תוכנית מוצעת</h3><p class="muted small" style="margin:2px 0 10px">${esc(planText(r.plan))}</p>
           <div class="facts">${facts.map(([k, val]) => `<div class="fact"><div class="k">${esc(k)}</div><div class="v">${esc(val)}</div></div>`).join('')}</div>
           ${plan.stop ? `<p class="muted small" style="margin:10px 0 0">הכמות מחושבת לפי תיק של ${N(money(z.account))} וסיכון של ${N(z.risk + '%')} לעסקה${z.custom ? '' : ' (ברירת מחדל)'}. <button class="linkish" data-act="settings-sizing">שינוי</button></p>` : ''}</div>
         <div class="card"><h3>כל האותות</h3><p class="muted small" style="margin:2px 0 8px">כל אות מקבל ציון בין שלילי לחיובי. אותות בלי נתונים לא מוצגים.</p>
@@ -1044,12 +1227,20 @@
     return `<div class="sheet-bar"><div class="topbar-in"><button class="icon-btn" data-act="close" aria-label="חזרה">${ICON.back}</button>
         <div class="brand"><h1>איך קוראים את הרדאר</h1></div></div></div>
       <div class="sheet-in guide">
+        <div class="card"><h3>ארבעה דברים בכל מניה</h3><ul class="list">
+          <li>הרדאר עונה על שאלה אחת: אצל אילו מניות יש היום הכי הרבה סימנים שמצביעים על עלייה. הוא לא עונה על "האם היא תעלה".</li>
+          ${li('פוטנציאל:', 'כמה סימנים מסכימים ביניהם. 50 = ניטרלי. מתחת ל־60 מניה לא נבחרת.')}
+          ${li('סיכון:', 'כמה המניה קופצת. סיכון גבוה אומר שגם הירידות יהיו חדות.')}
+          ${li('הסיבות:', 'במילים, למשל "מנהלים קנו מניות מכספם הפרטי". סיבה שלא ברורה – שואלים עליה.')}
+          ${li('סטופ:', 'המחיר שבו מודים שהרעיון לא עבד ויוצאים. בלי סטופ אין תוכנית.')}
+          <li>הנתון החשוב ביותר נמצא בראש המסך: האם הבחירות של הרדאר מנצחות את S&amp;P 500. אם אחרי כמה חודשים לא – אין לו יתרון, ועדיף מדד.</li></ul></div>
         <div class="card"><h3>בקצרה</h3><ul class="list">
           <li>כל בוקר המערכת עוברת על כ־6,000 מניות אמריקאיות ומשאירה עד 10. היא מסננת, היא לא יודעת לחזות.</li>
           <li>הכרטיס העליון במסך הראשי אומר אם המערכת כבר הוכיחה שהיא מנצחת את S&amp;P 500. כל עוד לא, הרשימה היא לבדיקה ולמעקב בתיק הנייר, לא לקנייה.</li>
           <li>כל עסקה, גם על נייר: סטופ מראש, כמות לפי החישוב, ויציאה ביעד, בסטופ או אחרי 3 חודשים.</li></ul></div>
         <div class="card"><h3>הכרטיס של מניה</h3><ul class="list">
-          ${li('פוטנציאל (העיגול, 0 עד 100):', 'כמה מהאותות מצביעים לעלייה, בשקלול הביטחון בכל אחד. 50 = ניטרלי. מ־60 ומעלה מניה נכנסת לרשימה. זה לא אחוז סיכוי.')}
+          ${li('פוטנציאל (העיגול, 0 עד 100):', 'כמה מהאותות מצביעים לעלייה, בשקלול הביטחון בכל אחד. 50 = ניטרלי. מתחת ל־60 מניה לא נבחרת. כשמודל הסיכוי עבר את הבדיקה, הוא בוחר מבין המניות שעברו את הסף. זה לא אחוז סיכוי.')}
+          ${li('תוצאה צפויה לעסקה:', 'מה הרוויחה בממוצע עסקה במניות שעמדו באותו מקום בדירוג של המודל, בבדיקה על שנים שהוא לא ראה, מתוקן לפי מה שקרה בפועל להמלצות של המערכת. לידה – הממוצע של כל המניות.')}
           ${li('הגרף והאחוז לידו:', 'המחיר ב־3 החודשים האחרונים. קפיצה חדה בסוף הגרף שאחריה קו שטוח היא סימן מוכר להצעת רכישה.')}
           ${li('נקודות ירוקות:', 'הסיבות העיקריות שהמניה עלתה בסינון.')}
           ${li('שים לב:', 'האזהרה החשובה ביותר נגד המניה.')}
@@ -1058,7 +1249,7 @@
           ${li('סטופ:', 'המחיר שבו יוצאים בהפסד. הוא נקבע לפי התנודה הרגילה של המניה: 2.5 תנודות יומיות ממוצעות מתחת למחיר.')}
           ${li('יעד:', 'פי 3 מהמרחק לסטופ. סטופ 10% מתחת למחיר = יעד 30% מעליו.')}
           ${li('בדיקה לפני כניסה:', 'רשימה אוטומטית של סיבות לוותר: עסקת רכישה, דוח קרוב, מחיר יעד של אנליסטים מתחת למחיר, מחיר מתוח, הנפקה. הפירוט במסך המניה.')}
-          ${li('סיכוי באחוזים:', 'מופיע רק כשמודל הסיכוי עבר את הבדיקה על שנים שלא ראה.')}</ul></div>
+          ${li('סיכוי להגיע ליעד:', 'מופיע בשורה הקטנה, רק כשמודל הסיכוי עבר את הבדיקה על שנים שלא ראה. המודל בוחר לפי הרווח הצפוי ולא לפי הסיכוי להגיע ליעד, ולכן מניה נבחרת יכולה להגיע ליעד בתדירות רגילה ועדיין להרוויח יותר.')}</ul></div>
         <div class="card"><h3>הפס שמעל הרשימה</h3><ul class="list">
           ${li('שוק ניטרלי, חיובי או שלילי:', 'מצב הכלכלה והשוק: ריבית, אינפלציה, אבטלה ומדד הפחד VIX. במצב שלילי המערכת בוחרת פחות מניות ומחמירה בסף.')}
           ${li('נושא · פי X:', 'כמה מדברים בעולם על הנושא בשבוע האחרון לעומת החודשיים שלפניו. "מתקפות סייבר · פי 1.5" = פי 1.5 מהרגיל, וזה מעלה מעט את הציון של ענפים שנהנים מזה. לחיצה פותחת את לשונית השוק.')}</ul></div>
@@ -1113,6 +1304,9 @@
           ${conn ? `<div class="banner ${conn.ok ? 'good' : 'bad'}"><span class="dot"></span><div class="grow">${esc(conn.text)}</div></div>` : ''}
           <p class="muted small" style="margin:0">המפתח נשמר רק בטלפון הזה.</p>`}
         </div>
+        <div class="card stack" style="gap:10px"><h3>תצוגה</h3>
+          <div class="seg" role="group" aria-label="תצוגה"><button data-act="view-simple" aria-pressed="${state.view === 'simple'}">פשוטה</button><button data-act="view-full" aria-pressed="${state.view !== 'simple'}">מלאה</button></div>
+          <p class="muted small" style="margin:0">פשוטה: המניות של היום, ארבעת הדברים שצריך בכל אחת, והשוואה ל־S&amp;P 500. מלאה: כל המסכים, המודלים והבדיקות.</p></div>
         <div class="card stack" style="gap:10px" id="sizing"><h3>התיק שלי</h3>
           <p class="muted small" style="margin:0">לפי זה מחושבת הכמות בכל מניה: אם הסטופ נפגע, ההפסד הוא האחוז שבחרת מהתיק. נשמר רק בטלפון הזה.</p>
           <div class="field"><label for="acct">גודל התיק לחישוב (בדולרים)</label><input class="input mono" id="acct" inputmode="decimal" value="${mySizing().account}" style="text-align:left"></div>
@@ -1249,6 +1443,20 @@
 
   // ------------------------------------------------------------------ shell
   function loader() { return `<div class="loader"><div class="sweep"></div><span>טוען את הסריקה…</span></div>`; }
+  const navTabs = () => (state.view === 'simple'
+    ? [['today', 'היום'], ['results', 'תוצאות'], ['search', 'חיפוש']]
+    : [['today', 'היום'], ['market', 'שוק'], ['perf', 'ביצועים'], ['learn', 'למידה'], ['search', 'חיפוש']]);
+  const TABS = ['today', 'market', 'perf', 'learn', 'results', 'search'];
+  function setView(v) {
+    state.view = v;
+    store.set('view', v);
+    if (v === 'simple' && !['today', 'results', 'search'].includes(state.tab)) state.tab = 'today';
+    if (v === 'full' && state.tab === 'results') state.tab = 'today';
+    const sheet = state.sheet;
+    shell();
+    state.sheet = sheet;
+    render();
+  }
   function shell() {
     app.innerHTML = `
       <header class="topbar"><div class="topbar-in">
@@ -1259,7 +1467,7 @@
       </div></header>
       <main id="main"></main>
       <nav class="nav" aria-label="ניווט"><div class="nav-in">
-        ${[['today', 'היום'], ['market', 'שוק'], ['perf', 'ביצועים'], ['learn', 'למידה'], ['search', 'חיפוש']].map(([k, l]) => `<button data-tab="${k}">${ICON[k]}<span>${l}</span></button>`).join('')}
+        ${navTabs().map(([k, l]) => `<button data-tab="${k}">${ICON[k]}<span>${l}</span></button>`).join('')}
       </div></nav>
       <section class="sheet" id="sheet" hidden></section>
       <div id="modal-root"></div>
@@ -1268,7 +1476,7 @@
   function render() {
     charts.clear();
     const main = document.getElementById('main');
-    const views = { today: viewToday, market: viewMarket, perf: viewPerf, learn: viewLearn, search: viewSearch };
+    const views = { today: viewToday, market: viewMarket, perf: viewPerf, learn: viewLearn, results: viewResults, search: viewSearch };
     main.innerHTML = views[state.tab]();
     document.querySelectorAll('.nav button').forEach((b) => b.setAttribute('aria-current', b.dataset.tab === state.tab ? 'page' : 'false'));
     const lbl = document.getElementById('day-lbl');
@@ -1280,7 +1488,8 @@
     const el = document.getElementById('sheet');
     if (!state.sheet) { el.hidden = true; el.innerHTML = ''; document.body.style.overflow = ''; return; }
     const top = el.scrollTop;
-    el.innerHTML = state.sheet.kind === 'detail' ? viewDetail() : state.sheet.kind === 'guide' ? viewGuide() : viewSettings();
+    el.innerHTML = state.sheet.kind === 'detail' ? (state.view === 'simple' && !state.sheet.full ? viewDetailSimple() : viewDetail())
+      : state.sheet.kind === 'guide' ? viewGuide() : viewSettings();
     el.hidden = false;
     document.body.style.overflow = 'hidden';
     drawCharts(el);
@@ -1351,6 +1560,10 @@
     else if (act === 'guide') openGuide();
     else if (act === 'seen') { store.set('seen', APP_VERSION); render(); }
     else if (act === 'pm-all') { state.pmAll = true; render(); }
+    else if (act === 'view-full') setView('full');
+    else if (act === 'view-simple') setView('simple');
+    else if (act === 'detail-full') { state.sheet.full = true; renderSheet(); }
+    else if (act === 'open-learn') { setView('full'); state.tab = 'learn'; render(); }
     else if (act === 'pm-show') { state.pmShow = t.dataset.k || 'all'; state.pmAll = false; render(); }
     else if (act === 'save-sizing') saveSizing();
     else if (act === 'settings-sizing') { state.sheet = { kind: 'settings', anchor: 'sizing' }; renderSheet(); pushSheet(true); setTimeout(() => { const el = document.getElementById('sizing'); if (el) el.scrollIntoView({ block: 'start' }); }, 30); }
@@ -1385,14 +1598,14 @@
     const k = (location.hash || '').slice(1);
     if (k === 'setup' || k === 'settings') openSettings(k === 'setup' ? 'setup' : null);
     else if (k === 'guide') openGuide();
-    else if (['today', 'market', 'perf', 'learn', 'search'].includes(k) && k !== state.tab) { state.tab = k; render(); }
+    else if (TABS.includes(k) && k !== state.tab) { state.tab = k; render(); }
   });
   document.addEventListener('visibilitychange', () => { if (!document.hidden && state.job) pollJob(); });
 
   // ------------------------------------------------------------------ start
   shell();
   const h = (location.hash || '').slice(1);
-  if (['today', 'market', 'perf', 'learn', 'search'].includes(h)) state.tab = h;
+  if (TABS.includes(h)) state.tab = h;
   render();
   loadAll().then(() => {
     if (h === 'setup' || h === 'settings') openSettings(h === 'setup' ? 'setup' : null);

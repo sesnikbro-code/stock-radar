@@ -7,10 +7,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from . import review as selfreview
-from .features import INSIDER_HISTORY_DAYS, IndustryPeers, live_features
+from .features import (EARN, INDUSTRY, INSIDER, INSIDER_HISTORY_DAYS, IndustryPeers, live_features, market_at,
+                       tech_frame)
 from .journal import Journal
 from .model import ProbModel, model_spec, probability_signal
 from .scoring import composite, expected_move_3m, position_plan, risk_score
@@ -28,6 +30,7 @@ from .signals.technical import compute_panel_features, eligibility, scores_at, t
 from .sources import get_sources
 from .sources.countries import SHELL_DOMICILES, iso3_for
 from .sources.sec import flatten_filings
+from .train import base_plan
 from .util import MarketContext, SignalResult, TickerData, num
 
 log = logging.getLogger("radar.pipeline")
@@ -98,7 +101,7 @@ def fetch_ticker(src, settings, t: str, meta: dict, tech: dict, panel, spy, disc
     if settings.get("news.enabled"):
         news = list(det.get("news") or [])
         try:
-            news += src.extra_news(t, settings.get("news.lookback_days"))
+            news += src.extra_news(t, settings.get("news.lookback_days"), name=name, have=len(news))
         except Exception as e:  # noqa: BLE001
             log.debug("extra news failed %s: %s", t, e)
         news = _dedupe_news(news)
@@ -218,6 +221,41 @@ def build_context(src, settings, panel, today, candidates_info: list[TickerData]
 
 SPARK_DAYS = 130
 
+def model_prescore(model: ProbModel, feats: dict, t_last, universe: list[str], eligible: pd.Series,
+                   spy: pd.Series | None) -> pd.Series:
+    """The model's score for every stock that passed the liquidity filters, from what is known without fetching
+    each company's data: price and volume, the market, and the industry (insider buying and earnings reports are
+    added for the finalists). Decides which stocks get the full check, and each stock's place in today's ranking."""
+    tf = tech_frame(feats, t_last).reindex(universe)
+    for k in INSIDER:
+        tf[k] = 0.0
+    for k in EARN:
+        tf[k] = np.nan
+    for k, v in (market_at(spy, len(spy) - 1) if spy is not None else {}).items():
+        tf[k] = v
+    imap = model.meta.get("industry_map") or {}
+    if imap:
+        ind = IndustryPeers(imap).frame(feats["mom_6_1"].loc[t_last], feats["rs_63"].loc[t_last], eligible,
+                                        {t: imap.get(t) for t in universe})
+        for k in INDUSTRY:
+            tf[k] = ind[k].reindex(universe).to_numpy()
+    X = tf.reindex(columns=model.features).to_numpy(dtype=float)
+    return pd.Series(model.score_raw(X), index=universe)
+
+
+def data_quality(health: dict) -> list[str]:
+    """Reasons the scan's data is too partial to act on (the cloud's backup run tries again later)."""
+    n, out = health.get("n") or 0, []
+    if n < 20:
+        return out
+    if health.get("analysts", n) < 0.3 * n and health.get("sector", n) < 0.5 * n:
+        out.append("הנתונים מ־Yahoo (אנליסטים, ענף ושווי שוק) לא התקבלו")
+    elif health.get("analysts", n) < 0.3 * n:
+        out.append("נתוני האנליסטים לא התקבלו")
+    if health.get("filings", n) < 0.3 * n:
+        out.append("דיווחי SEC לא התקבלו")
+    return out
+
 
 def load_model(settings, demo: bool, model_path: Path | None) -> ProbModel | None:
     path = Path(model_path) if model_path else settings.data_dir / ("model_demo.json" if demo else "model.json")
@@ -289,8 +327,31 @@ def run_scan(settings, demo: bool = False, tickers: list[str] | None = None, pro
         raise RuntimeError("אף מניה לא עברה את מסנני הנזילות והמחיר.")
     ranked = tech_df.sort_values("tech_score", ascending=False)
     top_n = settings.get("scan.top_candidates")
-    cands = list(ranked.index[:top_n]) if not tickers else list(ranked.index)
+    spy_all = panel["Close"]["SPY"] if "SPY" in panel["Close"].columns else None
+    # picks come from the model when it passed its test (and the self-review did not find it failing live)
+    use_model = (model is not None and model.quality > 0 and bool(settings.get("scan.pick_by_model", True))
+                 and not (rstate.get("drift") == "bad" and rstate.get("model_id") == mid))
+    pre = None
+    if use_model and not tickers:
+        try:
+            universe_ok = [t for t in tech_df.index if t != "SPY"]
+            pre = model_prescore(model, feats, t_last, universe_ok, elig, spy_all).dropna()
+        except Exception as e:  # noqa: BLE001
+            log.warning("דירוג המודל לכל השוק נכשל, הבחירה חוזרת לציון המשולב: %s", e)
+            pre = None
+    if tickers:
+        cands = list(ranked.index)
+    elif pre is not None and len(pre):
+        n_band = int(np.ceil(model.band_frac * len(pre)))
+        n_model = min(150, max(int(settings.get("scan.model_candidates") or 80), n_band + 10))
+        cands = list(pre.sort_values(ascending=False).index[:n_model])
+        cands += [t for t in ranked.index[:int(settings.get("scan.tech_candidates") or 30)] if t not in set(cands)]
+        log.info("המודל דירג %d מניות. %d המובילות שלו (מתוכן %d ברמת הבחירה) ועוד %d לפי הסינון הטכני עוברות לבדיקה "
+                 "מעמיקה", len(pre), n_model, n_band, len(cands) - n_model)
+    else:
+        cands = list(ranked.index[:top_n])
     cands += [t for t in forced | set(discovery) if t in tech_df.index and t not in cands]
+    pre_sorted = np.sort(pre.to_numpy()) if pre is not None and len(pre) else None
     log.info("%d מניות עברו את המסננים, %d נבחרו לבדיקה מעמיקה", len(tech_df), len(cands))
 
     # 3. deep data --------------------------------------------------------------
@@ -316,6 +377,7 @@ def run_scan(settings, demo: bool = False, tickers: list[str] | None = None, pro
     # 4. context + signals -------------------------------------------------------
     ctx = build_context(src, settings, panel, today, tds, journal)
     weights, factors = effective_weights(settings, journal)
+    plan = (model.plan if use_model and model.plan else None) or base_plan(settings)   # stop, target, holding time
     if model is None or model.quality <= 0:
         weights["model"] = 0.0  # no tested model yet: don't let its empty slot dilute the other signals
     elif rstate.get("drift") == "bad" and rstate.get("model_id") == mid:
@@ -338,7 +400,7 @@ def run_scan(settings, demo: bool = False, tickers: list[str] | None = None, pro
             journal.add_option_volume(td.ticker, today, (opt.get("call_vol") or 0) + (opt.get("put_vol") or 0))
         sigs = build_signals(td, ctx, settings)
         deal = corporate_events(td, sigs, today, settings.get("deals.enabled", True))
-        prob, hist, mf, bucket, plive, prob_model = None, None, None, None, None, None
+        prob, hist, mf, bucket, plive, prob_model, score, pct = None, None, None, None, None, None, None, None
         try:
             long_rows = td.insider_rows_long
             mf = live_features(td.tech, long_rows if long_rows is not None else td.insider_rows, td.earnings,
@@ -348,8 +410,9 @@ def run_scan(settings, demo: bool = False, tickers: list[str] | None = None, pro
             sigs["earnings_drift"] = earnings_drift_signal(mf)
             if model is not None and model.quality > 0:  # only a model that passed its out-of-sample test
                 score = model.score(mf)
-                hist = model.bucket(score)
-                bucket = model.bucket_index(score)
+                if pre_sorted is not None:   # place in today's ranking of all stocks
+                    pct = float(np.searchsorted(pre_sorted, score, side="right")) / len(pre_sorted)
+                bucket, hist = model.rank_bucket(pct, score)
                 prob = prob_model = model.display_prob(score, hist)
                 # what really happened so far to my recommendations at this level corrects the test's number
                 plive = selfreview.live_bucket(rstate, mid, bucket, hist)
@@ -378,7 +441,7 @@ def run_scan(settings, demo: bool = False, tickers: list[str] | None = None, pro
             "rsi": num(td.tech.get("rsi14")), "ext50": close / sma50 - 1 if close and sma50 else None,
             "target_mean": num(pt.get("mean")) or num(td.info.get("targetMeanPrice")),
             "n_analysts": num(td.info.get("numberOfAnalystOpinions")),
-            "risk_reasons": risk_reasons, "plan": position_plan(td.price, atr, settings.get("risk")),
+            "risk_reasons": risk_reasons, "plan": position_plan(td.price, atr, settings.get("risk"), plan),
             "atr": atr, "move_3m": expected_move_3m(num(td.tech.get("atr_pct"))),
             "sector": td.info.get("sector", ""), "industry": td.info.get("industry", ""),
             "country": td.info.get("country", ""), "market_cap": num(td.info.get("marketCap")),
@@ -386,7 +449,10 @@ def run_scan(settings, demo: bool = False, tickers: list[str] | None = None, pro
             "prob": prob, "prob_base": model.base if model is not None and prob is not None else None,
             "prob_live": plive if prob is not None else None, "prob_model": prob_model,
             "bucket": bucket, "_feats": mf, "dollar_vol": num(td.tech.get("dollar_vol20")),
-            "prob_hist": {k: hist.get(k) for k in ("ret", "rate", "stop", "win", "n")} if hist else None,
+            "model_score": score, "model_pct": pct,
+            "in_band": bool(pct is not None and model is not None and pct >= 1 - model.band_frac),
+            "prob_hist": {k: hist.get(k) for k in ("ret", "rate", "stop", "win", "n", "band")} if hist else None,
+            "exp_base": model.base_ret if model is not None and prob is not None else None,
             "prob_rule": {"mode": model.meta.get("target_mode") or "pct", "r": model.meta.get("target_r"),
                           "pct": model.meta.get("target"), "horizon": model.meta.get("horizon")}
             if model is not None and prob is not None else None,
@@ -394,13 +460,25 @@ def run_scan(settings, demo: bool = False, tickers: list[str] | None = None, pro
                        for v in panel["Close"][td.ticker].reindex(spark_idx).values],
             "pick": False, "why_not": None, "lesson": None,
         })
-    results.sort(key=lambda r: r["upside"], reverse=True)
 
     # 5. picks -------------------------------------------------------------------
+    health = {"n": len(tds), "news": sum(1 for td in tds if td.news),
+              "filings": sum(1 for td in tds if td.filings is not None),
+              "insider_sec": sum(1 for td in tds if td.insider_source == "SEC"),
+              "analysts": sum(1 for td in tds if td.details.get("eps_trend") is not None),
+              "options": sum(1 for td in tds if td.details.get("options")),
+              "sector": sum(1 for td in tds if td.info.get("sector"))}
+    degraded = data_quality(health) if not tickers else []
+    if degraded:
+        log.warning("הסריקה חלקית: %s. לא נפתחות עסקאות בתיק הנייר, וריצת הגיבוי תנסה שוב.", "; ".join(degraded))
     max_picks = settings.get("scan.max_picks")
     min_up = settings.get("scan.min_upside_score")
     if ctx.regime.get("risk_off"):
         max_picks, min_up = max(1, max_picks // 2), min_up + 5
+    model_mode = use_model and pre is not None and not tickers
+    if model_mode:
+        # the model chooses; the other signals can only veto a stock whose overall picture is clearly negative
+        min_up = float(settings.get("scan.min_upside_model") or 60)
     # lessons the self-review adopted (found in live results and confirmed on history): those stocks are skipped
     lessons = selfreview.active_lessons(rstate)
     if lessons and results:
@@ -413,44 +491,54 @@ def run_scan(settings, demo: bool = False, tickers: list[str] | None = None, pro
             hit = next((lz for lz in lessons if lz["key"] in cf and cf[lz["key"]].iloc[i] == 1), None)
             if hit:
                 r["lesson"] = {"key": hit["key"], "text": hit["text"]}
+
+    def level_ret(r):   # what the stock's level earned in the test, corrected by what really happened since
+        live = r.get("prob_live") or {}
+        return live.get("ret_adj", (r.get("prob_hist") or {}).get("ret") or 0)
+
     # why each stock was or was not picked (the self-review checks later whether each filter was right)
+    check_edge = settings.get("scan.require_model_edge") and model is not None and model.quality > 0
     for r in results:
         if r.get("exclude"):          # in a pending takeover or bankrupt: the upside is capped or gone
             r["why_not"] = "deal"
-        elif r["upside"] < min_up:
-            r["why_not"] = "upside"
         elif r["risk"] > settings.get("scan.max_risk_score"):
             r["why_not"] = "risk"
-    picks = [r for r in results if r["why_not"] is None]
-    n_excl = sum(1 for r in results if r.get("exclude") and r["upside"] >= min_up)
-    if n_excl:
-        log.info("%d מניות סוננו כי הן בתהליך רכישה או בפשיטת רגל", n_excl)
-    if settings.get("scan.require_model_edge") and model is not None and model.quality > 0:
-        # stocks whose probability level lost money on average (in the model's test, corrected by what really
-        # happened since) are skipped
-        def level_ret(r):
-            live = r.get("prob_live") or {}
-            return live.get("ret_adj", (r.get("prob_hist") or {}).get("ret") or 0)
-        for r in picks:
-            if r.get("prob_hist") and level_ret(r) <= 0:
-                r["why_not"] = "edge"
-        n0 = len(picks)
-        picks = [r for r in picks if r["why_not"] is None]
-        if n0 != len(picks):
-            log.info("%d מניות לא נבחרו כי ברמת הסיכוי שלהן העסקאות הפסידו בממוצע בבדיקה", n0 - len(picks))
-    for r in picks:
-        if r.get("lesson"):
+        elif model_mode and not r.get("in_band"):
+            r["why_not"] = "band"
+        elif r["upside"] < min_up:
+            r["why_not"] = "upside"
+        elif check_edge and r.get("prob_hist") and level_ret(r) <= 0:
+            r["why_not"] = "edge"
+        elif r.get("lesson"):
             r["why_not"] = "lesson:" + r["lesson"]["key"]
-    n0 = len(picks)
-    picks = [r for r in picks if r["why_not"] is None]
-    if n0 != len(picks):
-        log.info("%d מניות לא נבחרו בגלל לקח שהביקורת העצמית למדה", n0 - len(picks))
-    if not tickers:
-        for r in picks[max_picks:]:
+    order = (lambda r: -(r.get("model_score") if r.get("model_score") is not None else -9)) if model_mode \
+        else (lambda r: -r["upside"])
+    passing = sorted([r for r in results if r["why_not"] is None], key=order)
+    per_sector = int(settings.get("scan.max_per_sector") or 0)
+    picks, count = [], {}
+    for r in passing:
+        sec_ = r.get("sector") or ""
+        if tickers:
+            picks.append(r)
+        elif per_sector and sec_ and count.get(sec_, 0) >= per_sector:
+            r["why_not"] = "sector"
+        elif len(picks) >= max_picks:
             r["why_not"] = "rank"
-        picks = picks[:max_picks]
+        else:
+            picks.append(r)
+            count[sec_] = count.get(sec_, 0) + 1
     for r in picks:
         r["pick"] = True
+    skipped = {}
+    for r in results:
+        if r["why_not"]:
+            k = r["why_not"].split(":")[0]
+            skipped[k] = skipped.get(k, 0) + 1
+    log.info("נבחרו %d מניות (%s). לא נבחרו: %s", len(picks), "לפי המודל" if model_mode else "לפי הציון המשולב",
+             ", ".join(f"{k} {v}" for k, v in sorted(skipped.items())))
+    # the list: picks first in the order they were chosen, then the rest by the model's ranking (or the score)
+    rest = sorted([r for r in results if not r["pick"]], key=order)
+    results = picks + rest
 
     # 6. journal, paper trading, learning ---------------------------------------
     learning, paper, review = {}, {"n": 0}, None
@@ -458,17 +546,21 @@ def run_scan(settings, demo: bool = False, tickers: list[str] | None = None, pro
         journal.record_run(today, ctx.regime, results, len(picks))
         try:
             selfreview.record(journal, today, t_last.date(), results, ctx, model,
-                              float(settings.get("train.cost_pct") or 0.2) / 100)
+                              float(settings.get("train.cost_pct") or 0.2) / 100, plan)
         except Exception as e:  # noqa: BLE001 - the scan itself must not fail because of the review
             log.warning("שמירת התחזיות לביקורת העצמית נכשלה: %s", e)
         n_eval = journal.evaluate(panel, today)
         if n_eval:
             log.info("נבדקו %d המלצות עבר מול התוצאה בפועל", n_eval)
         if settings.get("paper.enabled"):
-            journal.paper_open(picks, today, settings.get("paper.max_open_positions"))
+            if not degraded:   # partial data: no new positions until a full scan
+                journal.paper_open(picks, today, settings.get("paper.max_open_positions"), bar_date=t_last.date(),
+                                   max_new=int(settings.get("paper.max_new_per_day") or 0), plan=plan)
             journal.paper_update(panel, today, settings.get("paper"), settings.get("risk.atr_stop_multiple"),
-                                 settings.get("risk.target_r") if settings.get("paper.take_profit") else None)
-            paper = journal.paper_summary(spy, settings.get("risk.target_r") if settings.get("paper.take_profit") else None)
+                                 settings.get("risk.target_r") if settings.get("paper.take_profit") else None,
+                                 default_plan=base_plan(settings))
+            paper = journal.paper_summary(spy, settings.get("risk.target_r") if settings.get("paper.take_profit") else None,
+                                          default_plan=base_plan(settings))
         try:
             review = selfreview.run(journal, panel, feats, today, settings, model)
             log.info("ביקורת עצמית: %d מניות נבדקו אחרי חודש, %d לקחים פעילים", (review.get("counts") or {}).get("graded", 0),
@@ -479,13 +571,10 @@ def run_scan(settings, demo: bool = False, tickers: list[str] | None = None, pro
             learning = journal.learn(list(SIGNAL_LABELS), settings.get("learning"),
                                      skip=set((review or {}).get("factors") or {}))
     journal.close()
-    health = {"n": len(tds), "news": sum(1 for td in tds if td.news),
-              "filings": sum(1 for td in tds if td.filings is not None),
-              "insider_sec": sum(1 for td in tds if td.insider_source == "SEC"),
-              "analysts": sum(1 for td in tds if td.details.get("eps_trend") is not None),
-              "options": sum(1 for td in tds if td.details.get("options"))}
     return {"date": today, "ctx": ctx, "results": results, "picks": picks, "weights": weights, "factors": factors,
-            "health": health, "review": review,
+            "health": health, "review": review, "degraded": degraded, "plan": plan,
+            "pick_mode": "model" if model_mode else "score",
+            "band_frac": model.band_frac if model_mode else None,
             "learning": learning, "paper": paper, "n_universe": len(meta), "n_screened": len(tech_df),
             "n_deep": len(tds), "demo": demo, "single": bool(tickers),
             "model": _model_summary(model),
@@ -506,4 +595,6 @@ def _model_summary(model: ProbModel | None) -> dict | None:
             "spy_ret": (money.get("model") or {}).get("spy"), "top_win": (money.get("model") or {}).get("win"),
             "top_stop": (money.get("model") or {}).get("stop"), "test_start": v.get("test_start"),
             "test_end": v.get("test_end"), "kind": model.kind, "sel_start": v.get("sel_start"),
-            "sel_end": v.get("sel_end"), "n_candidates": len(v.get("candidates") or [])}
+            "sel_end": v.get("sel_end"), "n_candidates": len(v.get("candidates") or []),
+            "band_frac": model.band_frac, "plan_key": (model.plan or {}).get("key"),
+            "band_ret": (model.band_stats() or {}).get("ret"), "band_all": model.base_ret}

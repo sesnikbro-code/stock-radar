@@ -9,7 +9,7 @@ from pathlib import Path
 
 from ..features import merge_earnings
 from ..net import Http
-from . import countries, finnhub, fred, gdelt, llm, sec, usaspending
+from . import countries, finnhub, fred, gdelt, llm, rss, sec, usaspending
 
 log = logging.getLogger("radar.sources")
 
@@ -22,6 +22,7 @@ class LiveSources:
         self.http = Http(settings.cache_dir, settings.user_agent)
         self._market = None
         self._train_http = None
+        self.feeds = rss.Feeds(self.http)
         if not settings.get("general.sec_email"):
             log.warning("לא הוגדר אימייל ל־SEC (sec_email בקובץ config.yaml או SEC_EMAIL ב־.env). "
                         "SEC עלולה לחסום בקשות בלי אימייל ליצירת קשר.")
@@ -130,10 +131,14 @@ class LiveSources:
         return gdelt.country_conflict(self.http, name)
 
     # ---------------------------------------------------------------- news
-    def extra_news(self, ticker: str, days: int):
-        if not self.s.get("news.use_finnhub"):
-            return []
-        return finnhub.company_news(self.http, self.s.secret("FINNHUB_API_KEY"), ticker, days)
+    def extra_news(self, ticker: str, days: int, name: str | None = None, have: int = 0):
+        """Finnhub (free key) and, when a stock still has no headlines, the free RSS feeds."""
+        out = []
+        if self.s.get("news.use_finnhub"):
+            out = finnhub.company_news(self.http, self.s.secret("FINNHUB_API_KEY"), ticker, days)
+        if not out and not have and self.s.get("news.use_rss", True):
+            out = self.feeds.news(ticker, name, days)
+        return out
 
     def classify_news(self, ticker: str, name: str, news: list[dict]):
         if not self.s.get("news.use_llm"):

@@ -336,7 +336,7 @@ class TestTrainEndToEnd(unittest.TestCase):
             self.assertTrue(all(p is not None and 0 < p < 1 for p in probs))
             self.assertTrue(all(r["prob_hist"] and r["prob_rule"]["mode"] == "r" for r in res["results"]))
             self.assertTrue(all(r["prob_hist"]["ret"] > 0 for r in res["picks"]))   # no picks with a losing history
-            self.assertTrue(all(r["plan"].get("target") for r in res["picks"]))
+            self.assertTrue(all(r["plan"].get("stop") for r in res["picks"]))
             self.assertIn("model", res["results"][0]["signals"])
             self.assertIn("earnings_drift", res["results"][0]["signals"])
             j = scan_json(res)
@@ -477,12 +477,15 @@ class TestCloudScripts(unittest.TestCase):
             data.mkdir(parents=True)
             (root / "config.yaml").write_text("train:\n  enabled: true\n  retrain_days: 30\nalerts:\n  x: 1\n",
                                               encoding="utf-8")
-            spec = self._need(root, "--spec")
-            self.assertTrue(spec.startswith("v3:r3"))
+            key = self._need(root, "--spec")          # the question + the training revision
+            self.assertTrue(key.startswith("v3:r3"))
+            spec = key.split("#")[0]
             now = datetime.now(timezone.utc).isoformat()
             self.assertEqual(self._need(root), "yes")                  # no model yet
-            (data / "model_attempt.txt").write_text(f"{date.today().isoformat()} {spec}", encoding="utf-8")
+            (data / "model_attempt.txt").write_text(f"{date.today().isoformat()} {key}", encoding="utf-8")
             self.assertEqual(self._need(root), "no")                   # tried today: wait
+            (data / "model_attempt.txt").write_text(f"{date.today().isoformat()} {spec}", encoding="utf-8")
+            self.assertEqual(self._need(root), "yes")                  # tried today, but before the update
             (data / "model_attempt.txt").write_text(f"{date.today().isoformat()} v1:old", encoding="utf-8")
             self.assertEqual(self._need(root), "yes")                  # the earlier try was for another question
             (data / "model_attempt.txt").unlink()
@@ -490,6 +493,10 @@ class TestCloudScripts(unittest.TestCase):
             (data / "model.json").write_text(json.dumps({"trained": old, "spec": spec}), encoding="utf-8")
             self.assertEqual(self._need(root), "yes")                  # model too old
             (data / "model.json").write_text(json.dumps({"trained": now, "spec": spec}), encoding="utf-8")
+            self.assertEqual(self._need(root), "yes")                  # fresh, but trained before the update's checks
+            from radar.train import TRAIN_REV
+            (data / "model.json").write_text(json.dumps({"trained": now, "spec": spec, "train_rev": TRAIN_REV}),
+                                             encoding="utf-8")
             self.assertEqual(self._need(root), "no")                   # fresh model
             (data / "model.json").write_text(json.dumps({"trained": now}), encoding="utf-8")
             self.assertEqual(self._need(root), "yes")                  # fresh, but answers an older question
