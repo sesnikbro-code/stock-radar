@@ -64,6 +64,13 @@ DEFAULTS: dict = {
         "show_original_headlines": True,
     },
     "options": {"enabled": True, "max_expirations": 2},
+    "telegram": {                     # public Telegram channels: shown next to the stock, not part of the score
+        "enabled": True,
+        "channels": ["Tisraelnewss"],
+        "labels": {"Tisraelnewss": "ביזנס 10"},
+        "lookback_days": 7,
+        "max_pages": 12,
+    },
     "deals": {"enabled": True},       # takeover check + offerings/late reports/bankruptcy from SEC filings
     "gov_contracts": {"enabled": True, "lookback_days": 120, "max_market_cap": 30_000_000_000},
     "geopolitics": {"enabled": True},

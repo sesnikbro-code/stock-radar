@@ -9,7 +9,7 @@ from pathlib import Path
 
 from ..features import merge_earnings
 from ..net import Http
-from . import countries, finnhub, fred, gdelt, llm, rss, sec, usaspending
+from . import countries, finnhub, fred, gdelt, llm, rss, sec, telegram, usaspending
 
 log = logging.getLogger("radar.sources")
 
@@ -138,6 +138,16 @@ class LiveSources:
             out = finnhub.company_news(self.http, self.s.secret("FINNHUB_API_KEY"), ticker, days)
         if not out and not have and self.s.get("news.use_rss", True):
             out = self.feeds.news(ticker, name, days)
+        return out
+
+    def telegram_posts(self, channels: list[str], days: int = 7, max_pages: int = 12) -> list[dict]:
+        """Recent posts of public Telegram channels (read from t.me/s/<name>, no account needed)."""
+        out = []
+        for ch in channels or []:
+            try:
+                out += telegram.fetch_channel(self.http, str(ch).strip().lstrip("@").split("/")[-1], days, max_pages)
+            except Exception as e:  # noqa: BLE001
+                log.warning("קריאת ערוץ הטלגרם %s נכשלה: %s", ch, e)
         return out
 
     def classify_news(self, ticker: str, name: str, news: list[dict]):

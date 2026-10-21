@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS weights (signal TEXT PRIMARY KEY, factor REAL, ic REA
 CREATE TABLE IF NOT EXISTS predictions (
     run_date TEXT, ticker TEXT, bar_date TEXT, pick INT, why_not TEXT, price REAL, atr REAL, cost REAL,
     prob REAL, exp_ret REAL, bucket INT, model TEXT, upside REAL, risk REAL, sector TEXT, earnings_date TEXT,
-    risk_off INT, ext50 REAL, feats TEXT, signals TEXT, pros TEXT, plan TEXT, PRIMARY KEY (run_date, ticker));
+    risk_off INT, ext50 REAL, feats TEXT, signals TEXT, pros TEXT, plan TEXT, tg INT, PRIMARY KEY (run_date, ticker));
 CREATE TABLE IF NOT EXISTS outcomes (
     run_date TEXT, ticker TEXT, status TEXT, entry_date TEXT, entry REAL, stop REAL, target REAL,
     exit_date TEXT, exit REAL, kind INT, ret REAL, r REAL, days INT, spy REAL, mfe_r REAL,
@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT);
 
 HORIZONS = (30, 90)
 # columns added after a table was first created (older journals get them on open)
-ADDED_COLUMNS = [("predictions", "plan", "TEXT"), ("paper", "plan", "TEXT")]
+ADDED_COLUMNS = [("predictions", "plan", "TEXT"), ("paper", "plan", "TEXT"), ("predictions", "tg", "INT")]
 
 
 def plan_text(plan: dict | None) -> str | None:

@@ -325,5 +325,14 @@ class DemoSources:
     def extra_news(self, ticker, days, name=None, have=0):
         return []
 
+    def telegram_posts(self, channels, days=7, max_pages=12):
+        """Two made-up posts, so the demo shows how a mention looks."""
+        from datetime import datetime, timedelta, timezone
+        now = datetime.now(timezone.utc)
+        return [{"id": 2, "date": now - timedelta(days=1), "channel": "demo",
+                 "text": "(דמו) מניית DMO008 קפצה אחרי הדוח הרבעוני\nפרטים בהמשך", "url": "https://t.me/s/demo"},
+                {"id": 1, "date": now - timedelta(days=4), "channel": "demo",
+                 "text": "(דמו) אנליסטים מעלים תחזית ל-$DMO038", "url": "https://t.me/s/demo"}]
+
     def classify_news(self, ticker, name, news):
         return None

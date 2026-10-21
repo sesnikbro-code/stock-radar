@@ -29,6 +29,7 @@ from .signals.news import analyze_news, catalysts_signal
 from .signals.technical import compute_panel_features, eligibility, scores_at, technical_signals
 from .sources import get_sources
 from .sources.countries import SHELL_DOMICILES, iso3_for
+from .sources import telegram
 from .sources.sec import flatten_filings
 from .train import base_plan
 from .util import MarketContext, SignalResult, TickerData, num
@@ -243,6 +244,11 @@ def model_prescore(model: ProbModel, feats: dict, t_last, universe: list[str], e
     return pd.Series(model.score_raw(X), index=universe)
 
 
+def _tg_fields(found: list[dict], enabled: bool) -> dict:
+    """Telegram mentions of one stock: the newest 3 and how many in the period (None when the channels were not read)."""
+    return {"tg": found[:3], "tg_n": len(found) if enabled else None}
+
+
 def data_quality(health: dict) -> list[str]:
     """Reasons the scan's data is too partial to act on (the cloud's backup run tries again later)."""
     n, out = health.get("n") or 0, []
@@ -376,6 +382,14 @@ def run_scan(settings, demo: bool = False, tickers: list[str] | None = None, pro
 
     # 4. context + signals -------------------------------------------------------
     ctx = build_context(src, settings, panel, today, tds, journal)
+    tg_posts, tg_on = [], bool(settings.get("telegram.enabled", True) and settings.get("telegram.channels"))
+    if tg_on and hasattr(src, "telegram_posts"):
+        try:   # public Telegram channels: which of these stocks the Israeli public is reading about
+            tg_posts = src.telegram_posts(settings.get("telegram.channels"), int(settings.get("telegram.lookback_days") or 7),
+                                          int(settings.get("telegram.max_pages") or 12))
+            log.info("נקראו %d הודעות מערוצי הטלגרם", len(tg_posts))
+        except Exception as e:  # noqa: BLE001
+            log.warning("קריאת ערוצי הטלגרם נכשלה: %s", e)
     weights, factors = effective_weights(settings, journal)
     plan = (model.plan if use_model and model.plan else None) or base_plan(settings)   # stop, target, holding time
     if model is None or model.quality <= 0:
@@ -459,6 +473,7 @@ def run_scan(settings, demo: bool = False, tickers: list[str] | None = None, pro
             "closes": [None if pd.isna(v) else round(float(v), 4)
                        for v in panel["Close"][td.ticker].reindex(spark_idx).values],
             "pick": False, "why_not": None, "lesson": None,
+            **_tg_fields(telegram.mentions(tg_posts, td.ticker, td.name) if tg_posts else [], bool(tg_posts)),
         })
 
     # 5. picks -------------------------------------------------------------------
@@ -467,7 +482,8 @@ def run_scan(settings, demo: bool = False, tickers: list[str] | None = None, pro
               "insider_sec": sum(1 for td in tds if td.insider_source == "SEC"),
               "analysts": sum(1 for td in tds if td.details.get("eps_trend") is not None),
               "options": sum(1 for td in tds if td.details.get("options")),
-              "sector": sum(1 for td in tds if td.info.get("sector"))}
+              "sector": sum(1 for td in tds if td.info.get("sector")),
+              "telegram": len(tg_posts) if tg_on else None}
     degraded = data_quality(health) if not tickers else []
     if degraded:
         log.warning("הסריקה חלקית: %s. לא נפתחות עסקאות בתיק הנייר, וריצת הגיבוי תנסה שוב.", "; ".join(degraded))
@@ -573,6 +589,7 @@ def run_scan(settings, demo: bool = False, tickers: list[str] | None = None, pro
     journal.close()
     return {"date": today, "ctx": ctx, "results": results, "picks": picks, "weights": weights, "factors": factors,
             "health": health, "review": review, "degraded": degraded, "plan": plan,
+            "telegram": {"labels": settings.get("telegram.labels") or {}, "posts": len(tg_posts)} if tg_on else None,
             "pick_mode": "model" if model_mode else "score",
             "band_frac": model.band_frac if model_mode else None,
             "learning": learning, "paper": paper, "n_universe": len(meta), "n_screened": len(tech_df),

@@ -400,6 +400,7 @@
     if (n >= 10 && news === 0) out.push('לא התקבלו חדשות לאף מניה בסריקה הזו, ולכן אותות החדשות לא פעלו. לבדוק חדשות ידנית.');
     if (res.length && !res.some((r) => 'filings_checked' in r)) out.push('הסריקה הזו מלפני העדכון: בדיקת עסקאות הרכישה תרוץ מהסריקה הבאה.');
     else if (h && n >= 10 && h.filings === 0) out.push('דיווחי SEC לא התקבלו בסריקה הזו, ולכן בדיקת עסקאות הרכישה וההנפקות לא רצה.');
+    if (d.telegram && d.telegram.posts === 0) out.push('ערוץ הטלגרם לא נקרא בסריקה הזו, ולכן האזכורים שם לא מוצגים.');
     return out;
   }
   function trustCard(d) {
@@ -650,6 +651,28 @@
       <ul class="trust-list">${lines.map((x) => `<li>${x}</li>`).join('')}</ul>
       <p class="trust-bottom">${esc(bottom)}</p></section>`;
   }
+  // public Telegram channels (e.g. ביזנס 10): shown next to the stock, not part of the score
+  const tgLabel = (c) => { const t = (state.data && state.data.telegram) || {}; return ((t.labels || {})[c]) || 'טלגרם'; };
+  function whenText(iso) {
+    if (!iso) return '';
+    const d = Math.floor(daysSince(iso));
+    return d <= 0 ? 'היום' : d === 1 ? 'אתמול' : `לפני ${d} ימים`;
+  }
+  function tgChip(r) {
+    const x = (r.tg || [])[0];
+    return x ? `<span class="chip">הוזכרה ב${esc(tgLabel(x.c))} · ${whenText(x.d)}</span>` : '';
+  }
+  function tgCard(r) {
+    const list = r.tg || [];
+    if (!list.length) {
+      return r.tg_n === 0 ? `<p class="muted small" style="margin:0">לא הוזכרה השבוע בערוץ ${esc(tgLabel(Object.keys(((state.data || {}).telegram || {}).labels || {})[0]))} – עוד לא בכותרות בישראל.</p>` : '';
+    }
+    return `<div class="card"><h3>בטלגרם</h3>
+      <p class="muted small" style="margin:2px 0 8px">${r.tg_n > list.length ? `${N(r.tg_n)} אזכורים בשבוע האחרון, האחרונים:` : 'אזכורים בשבוע האחרון:'}</p>
+      <div class="rows">${list.map((x) => `<a class="row" href="${esc(x.u)}" target="_blank" rel="noopener"><span class="grow"><span class="nm" style="white-space:normal;color:var(--ink)">${esc(x.t)}</span>
+        <span class="nm">${esc(tgLabel(x.c))} · ${x.d ? dmy(x.d) : ''} · ${whenText(x.d)}</span></span></a>`).join('')}</div>
+      <p class="muted small" style="margin:8px 0 0">הערוץ מסכם בעברית חדשות שכבר פורסמו. אזכור אומר שהמניה כבר בכותרות בישראל – לא שהיא תעלה. הביקורת העצמית בודקת אם מניות שהוזכרו שם הצליחו יותר או פחות.</p></div>`;
+  }
   function simpleCard(r, i, scanDate) {
     const [rc, rl] = riskLevel(r.risk);
     const pl = r.plan || {};
@@ -662,7 +685,7 @@
         <div class="s-num"><span class="eyebrow">סטופ</span><b class="num">${price(pl.stop)}</b><span class="muted small">${isNum(pl.stop_pct) ? `${pct(-pl.stop_pct, 0)} מתחת למחיר` : ''}</span></div>
       </div>
       ${pros.length ? `<ul class="pick-reasons">${pros.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}
-      <div class="chips">${checkChip(r, scanDate)}${r.deal ? `<span class="chip warn">${esc(r.deal.short)}</span>` : ''}</div>
+      <div class="chips">${checkChip(r, scanDate)}${r.deal ? `<span class="chip warn">${esc(r.deal.short)}</span>` : ''}${tgChip(r)}</div>
     </article>`;
   }
   function viewTodaySimple(d) {
@@ -707,6 +730,7 @@
             <p>המחיר שבו מודים שהרעיון לא עבד ויוצאים${isNum(pl.stop_pct) ? ` (${pct(-pl.stop_pct, 0)} מתחת למחיר)` : ''}. אם אפשר, שמים אותו כפקודה אצל הברוקר מיד אחרי הקנייה. אם לא – בודקים פעם ביום אחרי הסגירה.</p></div>
         </div>
         ${warn.length ? `<div class="card"><h3>שים לב</h3><ul class="list cons">${warn.map((x) => `<li>${esc(x)}</li>`).join('')}</ul></div>` : ''}
+        ${tgCard(r)}
         ${checklistCard(r, ctx)}
         <div class="card"><h3>התוכנית</h3><p class="small" style="margin:2px 0 10px">${esc(planText(pl))}</p>
           <div class="facts">${facts.map(([k, v]) => `<div class="fact"><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div></div>`).join('')}</div>
@@ -1204,6 +1228,7 @@
           ${plan.stop ? `<div class="legend" style="margin-top:6px"><span><i></i>מחיר</span><span><i class="dash" style="border-top-color:var(--bad)"></i>סטופ מוצע</span>${plan.target ? '<span><i class="dash" style="border-top-color:var(--good)"></i>יעד מוצע</span>' : ''}</div>` : ''}</div>
         ${(r.pros || []).length ? `<div class="card"><h3>למה נבחרה</h3><ul class="list pros">${r.pros.map((p) => `<li>${esc(p)}</li>`).join('')}</ul></div>` : ''}
         ${(r.cons || []).length ? `<div class="card"><h3>שים לב</h3><ul class="list cons">${r.cons.map((p) => `<li>${esc(p)}</li>`).join('')}</ul></div>` : ''}
+        ${tgCard(r)}
         <div class="card"><h3>תוכנית מוצעת</h3><p class="muted small" style="margin:2px 0 10px">${esc(planText(r.plan))}</p>
           <div class="facts">${facts.map(([k, val]) => `<div class="fact"><div class="k">${esc(k)}</div><div class="v">${esc(val)}</div></div>`).join('')}</div>
           ${plan.stop ? `<p class="muted small" style="margin:10px 0 0">הכמות מחושבת לפי תיק של ${N(money(z.account))} וסיכון של ${N(z.risk + '%')} לעסקה${z.custom ? '' : ' (ברירת מחדל)'}. <button class="linkish" data-act="settings-sizing">שינוי</button></p>` : ''}</div>

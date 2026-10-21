@@ -29,6 +29,7 @@ HOST_INTERVALS = {
     "api.callmebot.com": 3.0,
     "news.google.com": 1.0,       # free news feeds: be gentle
     "feeds.finance.yahoo.com": 0.5,
+    "t.me": 1.0,                  # public Telegram channel pages
 }
 
 FOREVER = -1

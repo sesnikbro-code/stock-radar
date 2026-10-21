@@ -82,6 +82,7 @@ def result_json(r: dict) -> dict:
         "prob_rule": r.get("prob_rule"), "prob_live": r.get("prob_live"), "prob_model": r.get("prob_model"),
         "lesson": r.get("lesson"), "why_not": r.get("why_not"),
         "model_pct": r.get("model_pct"), "in_band": bool(r.get("in_band")), "exp_base": r.get("exp_base"),
+        "tg": r.get("tg") or [], "tg_n": r.get("tg_n"),
         # takeover / corporate events (SEC filings) and the inputs of the app's pre-entry checklist
         "exclude": r.get("exclude"), "deal": r.get("deal"), "flags": r.get("flags") or [],
         "filings_checked": bool(r.get("filings_checked")),
@@ -117,6 +118,7 @@ def scan_json(res: dict) -> dict:
         "health": res.get("health"),
         "review": review_brief(res.get("review")),
         "degraded": res.get("degraded") or [], "pick_mode": res.get("pick_mode"), "band_frac": res.get("band_frac"),
+        "telegram": res.get("telegram"),
         "plan": {k: (res.get("plan") or {}).get(k) for k in ("key", "stop_atr", "target_r", "window", "trail_atr", "he")}
         if res.get("plan") else None,
     }

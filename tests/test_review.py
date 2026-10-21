@@ -131,11 +131,11 @@ def _seed(j: Journal, n_days=12, per_day=40, bad_key="atr_pct", seed=1):
             pick = int(i < 8)
             pred.append((rd, t, rd, pick, None if pick else "rank", 20.0, 0.4, 0.002, None, None, None, None, 70, 30,
                          "", None, 0, 0.05, json.dumps(feats), json.dumps({"momentum": [float(rng.normal()), 1.0]}),
-                         json.dumps(["סיבה"]), None))
+                         json.dumps(["סיבה"]), None, None))
             kind = 1 if ret21 > 0.03 else -1
             out.append((rd, t, "closed", rd, 20.0, 19.0, 23.0, rd, 20 * (1 + ret21), kind, ret21, ret21 * 20, 10,
                         0.0, 0.5, ret21, 0.0))
-    j.conn.executemany("INSERT INTO predictions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", pred)
+    j.conn.executemany("INSERT INTO predictions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", pred)
     j.conn.executemany("INSERT INTO outcomes VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", out)
     j.conn.commit()
 

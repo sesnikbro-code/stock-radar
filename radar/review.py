@@ -64,6 +64,7 @@ LIVE_ONLY = {
     "earn_soon": ("מניות עם דוח רבעוני צפוי בתוך 10 ימים", "דוח רבעוני קרוב"),
     "risk_off": ("כשהמאקרו הצביע על שוק מסוכן", "מאקרו מסוכן"),
     "extended": ("מניות 25% ומעלה מעל ממוצע 50 יום", "מתוחה מעל ממוצע 50"),
+    "tg": ("מניות שהוזכרו בערוץ הטלגרם בשבוע שלפני", "הוזכרה בטלגרם"),
 }
 WHY_NOT_HE = {
     "upside": "ציון הפוטנציאל היה נמוך מהסף", "risk": "ציון הסיכון היה גבוה מהסף",
@@ -118,6 +119,9 @@ def cond_frame(df: pd.DataFrame, thr: dict | None = None, live: bool = True) -> 
         if "ext50" in df:
             x = col("ext50")
             out["extended"] = (x >= 0.25).astype(float).where(x.notna())
+        if "tg" in df:
+            x = col("tg")
+            out["tg"] = (x > 0).astype(float).where(x.notna())
     return out
 
 
@@ -235,9 +239,9 @@ def record(journal, today: date, bar_date: date, results: list[dict], ctx, model
             r.get("sector") or "", str(ed)[:10] if ed else None, risk_off, num(r.get("ext50")),
             _pack(conn, "feat", feats, cache), _pack(conn, "sig", _sig_scores(r.get("signals")), cache),
             json.dumps((r.get("why") or {}).get("pros", [])[:3], ensure_ascii=False) if r.get("pick") else None,
-            plan_text(plan)))
+            plan_text(plan), r.get("tg_n")))
     journal.conn.execute("DELETE FROM predictions WHERE run_date=?", (today.isoformat(),))
-    journal.conn.executemany("INSERT OR REPLACE INTO predictions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+    journal.conn.executemany("INSERT OR REPLACE INTO predictions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                              rows)
     journal.conn.commit()
     return len(rows)
@@ -277,8 +281,8 @@ def _backfill(conn, panel, fpanel, cost_base: float) -> int:
             pros = []
         rows.append((run_date, t, bar, int(pick or 0), None if pick else "unknown", price, atr, cost, None, None, None,
                      None, up, risk, "", None, None, None, feats, _pack(conn, "sig", unpack("sig", sig), cache),
-                     json.dumps(pros, ensure_ascii=False) if pick else None, None))
-    conn.executemany("INSERT OR REPLACE INTO predictions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+                     json.dumps(pros, ensure_ascii=False) if pick else None, None, None))
+    conn.executemany("INSERT OR REPLACE INTO predictions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
     conn.commit()
     return len(rows)
 
