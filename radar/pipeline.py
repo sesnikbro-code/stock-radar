@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 
 from . import review as selfreview
+from . import tgwatch
 from .features import (EARN, INDUSTRY, INSIDER, INSIDER_HISTORY_DAYS, IndustryPeers, live_features, market_at,
                        tech_frame)
 from .journal import Journal
@@ -249,15 +250,6 @@ def _tg_fields(found: list[dict], enabled: bool) -> dict:
     return {"tg": found[:3], "tg_n": len(found) if enabled else None}
 
 
-def _tg_summary(settings, posts: list[dict]) -> dict:
-    """What the app shows about the channels: their Hebrew names and how many posts each one gave this scan."""
-    names = [telegram.channel_name(c) for c in settings.get("telegram.channels") or []]
-    per = {c: 0 for c in names}
-    for p in posts:
-        per[p.get("channel")] = per.get(p.get("channel"), 0) + 1
-    return {"labels": settings.get("telegram.labels") or {}, "channels": names, "per": per, "posts": len(posts)}
-
-
 def data_quality(health: dict) -> list[str]:
     """Reasons the scan's data is too partial to act on (the cloud's backup run tries again later)."""
     n, out = health.get("n") or 0, []
@@ -391,11 +383,10 @@ def run_scan(settings, demo: bool = False, tickers: list[str] | None = None, pro
 
     # 4. context + signals -------------------------------------------------------
     ctx = build_context(src, settings, panel, today, tds, journal)
-    tg_posts, tg_on = [], bool(settings.get("telegram.enabled", True) and settings.get("telegram.channels"))
+    tg_posts, tg_at, tg_on = [], None, tgwatch.enabled(settings)
     if tg_on and hasattr(src, "telegram_posts"):
         try:   # public Telegram channels: which of these stocks the Israeli public is reading about
-            tg_posts = src.telegram_posts(settings.get("telegram.channels"), int(settings.get("telegram.lookback_days") or 7),
-                                          int(settings.get("telegram.max_pages") or 12))
+            tg_posts, tg_at = tgwatch.read(src, settings)
             log.info("נקראו %d הודעות מערוצי הטלגרם", len(tg_posts))
         except Exception as e:  # noqa: BLE001
             log.warning("קריאת ערוצי הטלגרם נכשלה: %s", e)
@@ -564,11 +555,18 @@ def run_scan(settings, demo: bool = False, tickers: list[str] | None = None, pro
     # the list: picks first in the order they were chosen, then the rest by the model's ranking (or the score)
     rest = sorted([r for r in results if not r["pick"]], key=order)
     results = picks + rest
+    tg_sum, tg_found = (tgwatch.summary(settings, tg_posts, results, src, meta, tg_at, "scan") if tg_on
+                        else (None, []))
 
     # 6. journal, paper trading, learning ---------------------------------------
-    learning, paper, review = {}, {"n": 0}, None
+    learning, paper, review, tg_feed = {}, {"n": 0}, None, None
     if not tickers:
         journal.record_run(today, ctx.regime, results, len(picks))
+        if tg_on:
+            try:   # the log of what was taken from Telegram (the app's Telegram screen)
+                tg_feed = tgwatch.record(journal, tg_sum, tg_found)
+            except Exception as e:  # noqa: BLE001
+                log.warning("שמירת יומן הטלגרם נכשלה: %s", e)
         try:
             selfreview.record(journal, today, t_last.date(), results, ctx, model,
                               float(settings.get("train.cost_pct") or 0.2) / 100, plan)
@@ -598,7 +596,7 @@ def run_scan(settings, demo: bool = False, tickers: list[str] | None = None, pro
     journal.close()
     return {"date": today, "ctx": ctx, "results": results, "picks": picks, "weights": weights, "factors": factors,
             "health": health, "review": review, "degraded": degraded, "plan": plan,
-            "telegram": _tg_summary(settings, tg_posts) if tg_on else None,
+            "telegram": tg_sum, "telegram_feed": tg_feed,
             "pick_mode": "model" if model_mode else "score",
             "band_frac": model.band_frac if model_mode else None,
             "learning": learning, "paper": paper, "n_universe": len(meta), "n_screened": len(tech_df),

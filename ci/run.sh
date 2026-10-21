@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Runs inside GitHub Actions (called from .github/workflows/radar.yml).
-# Modes: setup (first install or update: starts the first real scan), scan, ticker, backtest, train, test-alert.
+# Modes: setup (first install or update: starts the first real scan), scan, ticker, backtest, train, test-alert,
+#        telegram (read the Telegram channels now, without a full scan).
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
@@ -93,6 +94,9 @@ case "$MODE" in
     ;;
   test-alert)
     python run.py --export docs/data test-alert || rc=$?
+    ;;
+  telegram)
+    python run.py --export docs/data telegram || rc=$?
     ;;
   *)
     fail_status "סוג הרצה לא מוכר: $MODE"

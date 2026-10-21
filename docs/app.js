@@ -110,6 +110,7 @@
     state.model = undefined;
     state.review = undefined;
     state.tickers = undefined;
+    state.tg = undefined;
     state.loading = false;
     render();
   }
@@ -274,7 +275,7 @@
     const out = [];
     const job = state.job;
     if (job) {
-      const what = job.mode === 'ticker' ? `ניתוח ${job.symbols}` : job.mode === 'backtest' ? 'בדיקה לאחור' : job.mode === 'test-alert' ? 'הודעת בדיקה' : job.mode === 'train' ? 'אימון מודל הסיכוי' : 'סריקה';
+      const what = job.mode === 'ticker' ? `ניתוח ${job.symbols}` : job.mode === 'backtest' ? 'בדיקה לאחור' : job.mode === 'test-alert' ? 'הודעת בדיקה' : job.mode === 'train' ? 'אימון מודל הסיכוי' : job.mode === 'telegram' ? 'משיכה מהטלגרם' : 'סריקה';
       const st = job.state === 'queued' ? 'ממתינה בתור' : 'רצה עכשיו';
       out.push(banner('info', `${what} ${st} בענן`, `התחילה ${ago(new Date(job.since).toISOString())}. האפליקציה תתעדכן לבד כשתסתיים.`));
     }
@@ -606,6 +607,7 @@
     return `<div class="stack">
       ${statusBanners()}
       ${whatsNew()}
+      ${tgStrip()}
       ${trustCard(d)}
       <div class="strip">
         <button class="pill ${mk}" data-tab="market"><span class="sw"></span>שוק ${esc(m.label || '')}</button>
@@ -656,7 +658,7 @@
       <p class="trust-bottom">${esc(bottom)}</p></section>`;
   }
   // public Telegram channels (e.g. ביזנס 10): shown next to the stock, not part of the score
-  const tgLabel = (c) => { const t = (state.data && state.data.telegram) || {}; return ((t.labels || {})[c]) || c || 'טלגרם'; };
+  const tgLabel = (c) => { const t = state.tg || (state.data && state.data.telegram) || {}; return ((t.labels || {})[c]) || c || 'טלגרם'; };
   function tgNames() {   // the channels this scan read, by their Hebrew names
     const t = (state.data && state.data.telegram) || {};
     const list = t.channels || Object.keys(t.labels || {});
@@ -682,6 +684,137 @@
         <span class="nm">${esc(tgLabel(x.c))} · ${x.d ? dmy(x.d) : ''} · ${whenText(x.d)}</span></span></a>`).join('')}</div>
       <p class="muted small" style="margin:8px 0 0">הערוצים מסכמים בעברית חדשות שכבר פורסמו. אזכור אומר שהמניה כבר בכותרות בישראל – לא שהיא תעלה. הביקורת העצמית בודקת אם מניות שהוזכרו שם הצליחו יותר או פחות.</p></div>`;
   }
+  // ---------------------------------------------------------------- Telegram: connection strip, screen, manual pull
+  async function loadTg() {
+    state.tg = null;   // loading
+    const j = await getJSON(state.demo ? 'demo/telegram.json' : 'telegram.json');
+    state.tg = j || false;
+    if (state.sheet && state.sheet.kind === 'telegram') renderSheet(true);
+    else if (!state.sheet) render();
+  }
+  // the newest of: telegram.json (with the log) and the summary inside the scan
+  function tgInfo() {
+    const d = state.data || {};
+    const f = state.tg || null, s = d.telegram || null;
+    if (!f && !s) return null;
+    const fAt = f && f.updated, sAt = s && (s.read_at || d.generated);
+    const cur = f && (!sAt || (fAt && fAt >= sAt))
+      ? { at: fAt, mode: f.mode, per: f.per, posts: f.posts, stats: f.stats, week: f.week, channels: f.channels }
+      : { at: sAt, mode: s.mode || 'scan', per: s.per, posts: s.posts, stats: s.stats, week: s.stocks, channels: s.channels };
+    cur.channels = cur.channels || Object.keys(cur.per || (s && s.labels) || {});
+    cur.reads = f ? f.reads : null;
+    cur.history = f ? f.history : null;
+    return cur;
+  }
+  function tgState(i) {
+    if (!i) return ['', 'עוד לא נקרא', 'הקריאה הראשונה תהיה בסריקה הבאה'];
+    const zero = i.channels.filter((c) => i.per && !i.per[c]);
+    if (!i.posts) return ['bad', 'לא מחובר', 'בקריאה האחרונה לא התקבלה אף הודעה'];
+    if (i.per && zero.length) return ['warn', 'מחובר חלקית', `לא נקראו הודעות מ: ${zero.map((c) => tgLabel(c)).join(', ')}`];
+    if (i.at && daysSince(i.at) > 3.5) return ['warn', 'לא עודכן', `הקריאה האחרונה ${ago(i.at)}`];
+    return ['good', 'מחובר', ''];
+  }
+  const tgRunning = () => !!(state.job && state.job.mode === 'telegram');
+  function tgStrip() {
+    if (state.tg === undefined) loadTg();
+    const i = tgInfo();
+    if (!i && !tgRunning()) return '';
+    const [tone, head] = tgState(i);
+    const line = tgRunning() ? 'משיכה ידנית רצה עכשיו בענן'
+      : `נקרא ${ago(i.at)} · ${N(i.channels.length)} ערוצים · ${N(i.posts || 0)} הודעות · ${N((i.week || []).length)} מניות השבוע`;
+    return `<button class="tg-strip ${tone}" data-act="open-tgs" aria-label="טלגרם: ${esc(head)}. לחץ לפרטים">
+      <span class="dot${tgRunning() ? ' pulse' : ''}"></span>
+      <span class="grow"><b>טלגרם: ${esc(head)}</b><span>${line}</span></span><span class="chev" aria-hidden="true">‹</span></button>`;
+  }
+  function openTelegram() {
+    const sh = { kind: 'telegram' };
+    if (state.sheet) { state.sheet = sh; renderSheet(); pushSheet(true); } else { state.sheet = sh; renderSheet(); pushSheet(); }
+    loadTg();
+  }
+  const hm = (iso) => { const t = new Date(iso); return isFinite(t) ? `${String(t.getDate()).padStart(2, '0')}/${String(t.getMonth() + 1).padStart(2, '0')} ${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}` : ''; };
+  const tgMode = (m) => (m === 'manual' ? 'משיכה ידנית' : 'סריקה יומית');
+  function tgStockRows(list, hist) {
+    const res = (state.data && state.data.results) || [];
+    return list.map((x) => {
+      const top = (x.tg || [])[0] || {};
+      const idx = res.findIndex((r) => r.ticker === x.ticker);
+      const pick = idx >= 0 && res[idx].pick;
+      const tag = pick ? '<span class="chip good">בחירה של היום</span>' : idx >= 0 ? '<span class="chip">נסרקה היום</span>' : '<span class="chip">לא ברדאר היום</span>';
+      const when = hist
+        ? `${N(x.n)} ${x.n === 1 ? 'אזכור' : 'אזכורים'} · ${x.first && dm(x.first) !== dm(x.last) ? `${dm(x.first)} עד ${dm(x.last)}` : dm(x.last)} · ${esc(Object.keys(x.channels || {}).map((c) => tgLabel(c)).join(', '))}`
+        : `${N(x.n)} ${x.n === 1 ? 'אזכור' : 'אזכורים'} · האחרון ב${esc(tgLabel(top.c))} ${whenText(top.d)}`;
+      const inner = `<span class="grow"><span class="tk">${esc(x.ticker)}</span>${x.name && x.name !== x.ticker ? ` <span class="nm"><bdi>${esc(x.name)}</bdi></span>` : ''}
+          <span class="nm wrap">${when}</span>
+          <span class="nm wrap" style="color:var(--ink)">${esc(top.t || '')}</span></span>${tag}`;
+      return idx >= 0 ? `<div class="row" data-open="${idx}" role="button" tabindex="0">${inner}</div>`
+        : `<a class="row" href="${esc(top.u || '#')}" target="_blank" rel="noopener">${inner}</a>`;
+    }).join('');
+  }
+  function viewTelegram() {
+    const i = tgInfo();
+    const [tone, head, sub] = tgState(i);
+    const repo = ghRepo();
+    const wf = repo ? `https://github.com/${repo.owner}/${repo.repo}/actions/workflows/radar.yml` : '';
+    let pull;
+    if (tgRunning()) {
+      pull = banner('info', 'המשיכה רצה עכשיו בענן', `התחילה ${ago(new Date(state.job.since).toISOString())}. בדרך כלל 3 עד 5 דקות (אם סריקה רצה באותו זמן – אחריה). המסך יתעדכן לבד.`);
+    } else if (state.job) {
+      pull = '<p class="muted small" style="margin:0">כבר רצה פעולה אחרת בענן. אפשר למשוך מהטלגרם כשהיא תסתיים.</p>';
+    } else if (cloudReady()) {
+      pull = `<button class="btn" data-run="telegram">${ICON.refresh.replace('<svg', '<svg width="18" height="18"')} משוך עכשיו מהטלגרם</button>
+        <p class="muted small" style="margin:0">קורא עכשיו את כל הערוצים, בלי סריקה מלאה. לוקח 3 עד 5 דקות.</p>`;
+    } else {
+      pull = `<button class="btn" data-act="tg-howto">${ICON.refresh.replace('<svg', '<svg width="18" height="18"')} משוך עכשיו מהטלגרם</button>
+        ${state.sheet && state.sheet.howto ? `<div class="banner warn"><span class="dot"></span><div class="grow"><b>האפליקציה עוד לא מחוברת ל־GitHub</b>
+          <span>חיבור חד־פעמי בהגדרות ("חיבור לענן") – ואז הכפתור הזה מושך מיד. בינתיים אפשר למשוך דרך GitHub:</span>
+          <ol class="steps" style="margin:6px 0 0">
+            <li>פתח: <a href="${esc(wf)}" target="_blank" rel="noopener" class="mono" style="word-break:break-all">${esc(wf)}</a></li>
+            <li>לחץ <span class="kbd">Run workflow</span> (הפעלת זרימת עבודה).</li>
+            <li>בשדה <span class="kbd">mode</span> מחק את <span class="kbd">scan</span> וכתוב <span class="kbd">telegram</span>.</li>
+            <li>לחץ על הכפתור הירוק <span class="kbd">Run workflow</span>.</li></ol>
+          <div style="margin-top:8px"><button class="btn small ghost" data-act="settings">לחיבור לענן</button></div></div></div>` : ''}`;
+    }
+    const st = (i && i.stats) || {};
+    const chanRows = i ? i.channels.map((c) => {
+      const s = st[c] || {};
+      const n = s.n != null ? s.n : ((i.per || {})[c] || 0);
+      return `<a class="row" href="https://t.me/s/${encodeURIComponent(c)}" target="_blank" rel="noopener">
+        <span class="sdot ${n ? 'good' : 'bad'}"></span><span class="grow">
+        <span class="tk" style="font-family:inherit">${esc(tgLabel(c))}</span>
+        <span class="nm wrap">${n ? `${N(n)} הודעות נקראו${s.from ? ` · מ־${dm(s.from)} עד ${dm(s.to)}` : ''}` : 'לא נקראו הודעות בקריאה האחרונה'}</span>
+        ${s.last_t ? `<span class="nm wrap">האחרונה שנקראה (${hm(s.to)}): <span style="color:var(--ink)">${esc(s.last_t)}</span></span>` : ''}</span></a>`;
+    }).join('') : '';
+    const week = (i && i.week) || [];
+    const h = i && i.history;
+    const reads = (i && i.reads) || [];
+    const loading = state.tg === null;
+    return `<div class="sheet-bar"><div class="topbar-in"><button class="icon-btn" data-act="close" aria-label="חזרה">${ICON.back}</button>
+        <div class="brand"><h1>טלגרם</h1></div></div></div>
+      <div class="sheet-in">
+        <div class="card stack" style="gap:10px">
+          <div class="tg-head ${tone}"><span class="dot"></span><div class="grow"><b>${esc(head)}</b>
+            <span class="muted small">${i ? `קריאה אחרונה: ${hm(i.at)} (${ago(i.at)}) · ${tgMode(i.mode)}` : esc(sub)}</span>
+            ${sub && i ? `<span class="small" style="display:block;color:var(--warn)">${esc(sub)}</span>` : ''}</div></div>
+          ${pull}
+        </div>
+        ${i ? `<div class="card"><h3>הערוצים</h3>
+          <p class="muted small" style="margin:2px 0 8px">ערוצים ציבוריים – נקראים בלי חשבון טלגרם. בכל קריאה נקראות ההודעות של השבוע האחרון. לחיצה על ערוץ פותחת אותו בטלגרם.</p>
+          <div class="rows">${chanRows}</div></div>
+        <div class="card"><h3>השבוע: מניות שהוזכרו (${N(week.length)})</h3>
+          ${week.length ? `<p class="muted small" style="margin:2px 0 8px">מניה שנסרקה היום – לחיצה פותחת אותה. אחרת – לחיצה פותחת את ההודעה בטלגרם.</p><div class="rows">${tgStockRows(week)}</div>`
+            : '<p class="muted small">אף מניה אמריקאית לא הוזכרה השבוע בערוצים.</p>'}</div>` : ''}
+        <div class="card"><h3>עד היום: כל מה שנלקח</h3>
+          ${h ? `<p class="muted small" style="margin:2px 0 8px">מאז ${dmy(h.since)}: ${N(h.n_mentions)} אזכורים של ${N(h.n_stocks)} מניות, ב־${N(h.reads)} קריאות של הערוצים. הודעה שנקראה שוב לא נספרת פעמיים.</p>
+            ${(h.stocks || []).length ? `<div class="rows">${tgStockRows(h.stocks.slice(0, state.sheet && state.sheet.allTg ? 200 : 15), true)}</div>
+              ${h.stocks.length > 15 && !(state.sheet && state.sheet.allTg) ? `<button class="btn small ghost" style="margin-top:8px" data-act="tg-all">הצג את כל ${N(h.stocks.length)} המניות</button>` : ''}` : ''}`
+            : `<p class="muted small">${loading ? 'טוען…' : 'היומן מתחיל להיאסף מהקריאה הבאה (הסריקה היומית או משיכה ידנית).'}</p>`}</div>
+        ${reads.length ? `<div class="card"><h3>קריאות אחרונות</h3><div class="rows">${reads.slice(0, 12).map((r) => `<div class="row" style="cursor:default"><span class="grow">
+            <span class="nm wrap" style="color:var(--ink)">${hm(r.ts)} · ${tgMode(r.mode)} · ${N(r.posts)} הודעות</span>
+            <span class="nm wrap">${Object.keys(r.per || {}).map((c) => `${esc(tgLabel(c))} ${N(r.per[c])}`).join(' · ')}</span></span>
+            <span class="sdot ${r.posts ? 'good' : 'bad'}"></span></div>`).join('')}</div></div>` : ''}
+        <p class="muted small">האזכורים מוצגים ליד המניות ולא משפיעים על הציון. הביקורת העצמית בודקת אם מניות שהוזכרו הצליחו יותר או פחות.</p>
+      </div>`;
+  }
   function simpleCard(r, i, scanDate) {
     const [rc, rl] = riskLevel(r.risk);
     const pl = r.plan || {};
@@ -701,7 +834,7 @@
     const res = d.results || [];
     const picks = res.map((r, i) => [r, i]).filter(([r]) => r.pick);
     return `<div class="stack">
-      ${statusBanners()}${whatsNew()}${scoreboard(d)}
+      ${statusBanners()}${whatsNew()}${tgStrip()}${scoreboard(d)}
       <div class="section-title"><h2>המניות של היום</h2><span class="muted small">${dmy(d.date)}</span></div>
       <p class="muted small" style="margin:-6px 0 0">הרדאר מראה אצל אילו מניות יש היום הכי הרבה סימנים לעלייה – לא האם הן יעלו. כל מניה כאן כבר עברה את הסינון. מסתכלים על ארבעה דברים: פוטנציאל, סיכון, הסיבות והסטופ. בלי סטופ אין תוכנית.</p>
       ${picks.length ? picks.map(([r, i]) => simpleCard(r, i, d.date)).join('') : '<div class="card empty">אף מניה לא עברה היום את הסינון. זה תקין – לפעמים הדבר הנכון הוא לחכות.</div>'}
@@ -762,6 +895,7 @@
       <div class="card"><h3>מה המערכת למדה</h3>
         ${concl.length ? `<ul class="concl">${concl.map((x) => `<li class="${esc(x.tone)}">${esc(x.text)}</li>`).join('')}</ul>` : `<p class="muted">${rv === undefined ? 'טוען…' : 'עוד אין מסקנות.'}</p>`}
         <button class="btn small ghost" style="margin-top:10px" data-act="open-learn">כל הפרטים</button></div>
+      ${tgStrip()}
       <div class="card"><h3>תיק הנייר</h3>
         <p class="muted small" style="margin:2px 0 8px">המערכת "קונה" את הבחירות שלה בלי כסף, עם סטופ, ועוקבת. ${N(p.open || 0)} פתוחות · ${N(p.closed || 0)} נסגרו.</p>
         ${closed.length ? `<div class="rows">${closed.map((x) => `<div class="row" style="cursor:default"><span class="grow"><span class="tk">${esc(x.ticker)}</span>
@@ -801,7 +935,8 @@
         ${themeRows || '<div class="empty">אין נתונים כרגע</div>'}</div>
       ${(d.countries || []).length ? `<div class="card"><h3>מדינות</h3><p class="muted small" style="margin:2px 0 6px">לחברות זרות שנסחרות בארה"ב ונבדקו היום</p>
         <ul class="list">${d.countries.map((c) => `<li>${esc(c.text[0])}${c.text[1] ? `<br><span style="color:var(--warn)">${esc(c.text[1])}</span>` : ''}</li>`).join('')}</ul></div>` : ''}
-      <p class="muted small">מקורות: מאקרו – FRED · מלחמות ומתיחות – GDELT · מדינות – IMF והבנק העולמי.</p>
+      ${tgStrip()}
+      <p class="muted small">מקורות: מאקרו – FRED · מלחמות ומתיחות – GDELT · מדינות – IMF והבנק העולמי${d.telegram ? ' · אזכורים בישראל – ערוצי טלגרם ציבוריים' : ''}.</p>
     </div>`;
   }
 
@@ -1350,7 +1485,7 @@
           <div class="muted small" id="sizing-msg" aria-live="polite"></div>
           <p class="muted small" style="margin:0">ברירת המחדל: 50,000$, 1% ו־10%. תיק הנייר וההודעה בטלגרם ממשיכים לפי הקובץ config.yaml.</p></div>
         ${cloudReady() ? `<div class="card stack" style="gap:10px"><h3>הפעלה ידנית</h3>
-          <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn ghost" data-run="scan">הרץ סריקה עכשיו</button><button class="btn ghost" data-run="backtest">הרץ בדיקה לאחור</button><button class="btn ghost" data-run="train">אמן את מודל הסיכוי</button><button class="btn ghost" data-run="test-alert">שלח הודעת בדיקה</button></div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn ghost" data-run="scan">הרץ סריקה עכשיו</button><button class="btn ghost" data-run="backtest">הרץ בדיקה לאחור</button><button class="btn ghost" data-run="train">אמן את מודל הסיכוי</button><button class="btn ghost" data-run="test-alert">שלח הודעת בדיקה</button><button class="btn ghost" data-run="telegram">משוך מהטלגרם</button></div>
           <p class="muted small" style="margin:0">סריקה מלאה או אימון של המודל לוקחים 15 עד 40 דקות. אפשר לסגור את האפליקציה בינתיים. המודל מתאמן לבד פעם בחודש.</p></div>` : ''}
         <div class="card stack" style="gap:8px"><h3>התקנה על מסך הבית</h3>${install}
           <p style="margin:0"><b>אנדרואיד (Chrome):</b> תפריט ⋮ למעלה, ואז "התקנת אפליקציה" או "הוספה למסך הבית".</p>
@@ -1433,7 +1568,7 @@
     } catch (e) { toast(e.message); return; }
     state.job = { mode, symbols: symbols || '', since: Date.now(), state: 'queued' };
     store.set('job', state.job);
-    toast(mode === 'ticker' ? `הניתוח של ${symbols} התחיל. זה לוקח כמה דקות.` : 'ההרצה התחילה בענן.');
+    toast(mode === 'ticker' ? `הניתוח של ${symbols} התחיל. זה לוקח כמה דקות.` : mode === 'telegram' ? 'המשיכה מהטלגרם התחילה בענן. 3 עד 5 דקות.' : 'ההרצה התחילה בענן.');
     render();
     pollJob();
   }
@@ -1455,6 +1590,7 @@
       }
     } catch (e) { /* try again later */ }
     if (state.tab === 'today' && !state.sheet) render();
+    else if (state.sheet && state.sheet.kind === 'telegram') renderSheet(true);
     pollT = setTimeout(pollJob, 15000);
   }
   async function finishJob(ok, reason) {
@@ -1472,6 +1608,9 @@
     } else if (job.mode === 'train') {
       toast('המודל אומן. סריקה חדשה עם הסיכויים מתחילה לבד ותסתיים בעוד כשעה.');
       state.tab = 'perf'; render();
+    } else if (job.mode === 'telegram') {
+      toast('המשיכה מהטלגרם הסתיימה');
+      openTelegram();
     } else toast(job.mode === 'test-alert' ? 'הודעת הבדיקה נשלחה' : 'ההרצה הסתיימה והנתונים עודכנו');
   }
 
@@ -1523,7 +1662,7 @@
     if (!state.sheet) { el.hidden = true; el.innerHTML = ''; document.body.style.overflow = ''; return; }
     const top = el.scrollTop;
     el.innerHTML = state.sheet.kind === 'detail' ? (state.view === 'simple' && !state.sheet.full ? viewDetailSimple() : viewDetail())
-      : state.sheet.kind === 'guide' ? viewGuide() : viewSettings();
+      : state.sheet.kind === 'guide' ? viewGuide() : state.sheet.kind === 'telegram' ? viewTelegram() : viewSettings();
     el.hidden = false;
     document.body.style.overflow = 'hidden';
     drawCharts(el);
@@ -1598,6 +1737,9 @@
     else if (act === 'view-simple') setView('simple');
     else if (act === 'detail-full') { state.sheet.full = true; renderSheet(); }
     else if (act === 'open-learn') { setView('full'); state.tab = 'learn'; render(); }
+    else if (act === 'open-tgs') openTelegram();
+    else if (act === 'tg-howto') { state.sheet.howto = true; renderSheet(true); }
+    else if (act === 'tg-all') { state.sheet.allTg = true; renderSheet(true); }
     else if (act === 'pm-show') { state.pmShow = t.dataset.k || 'all'; state.pmAll = false; render(); }
     else if (act === 'save-sizing') saveSizing();
     else if (act === 'settings-sizing') { state.sheet = { kind: 'settings', anchor: 'sizing' }; renderSheet(); pushSheet(true); setTimeout(() => { const el = document.getElementById('sizing'); if (el) el.scrollIntoView({ block: 'start' }); }, 30); }

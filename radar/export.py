@@ -136,6 +136,8 @@ def export_scan(res: dict, out_dir: Path, keep_days: int = 180) -> Path:
     if res.get("review"):
         _write(out_dir / ("demo/review.json" if res.get("demo") else "review.json"),
                {"schema": SCHEMA, "demo": bool(res.get("demo")), **res["review"]})
+    if res.get("telegram_feed"):   # the app's Telegram screen: what was read and taken from the channels
+        _write(out_dir / ("demo/telegram.json" if res.get("demo") else "telegram.json"), res["telegram_feed"])
     if res.get("demo"):
         _write(out_dir / "demo" / "latest.json", data)
         return out_dir / "demo" / "latest.json"

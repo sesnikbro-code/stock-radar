@@ -7,6 +7,7 @@
   python run.py backtest                  walk-forward backtest of the price signals
   python run.py train                     train + test the probability model on 5 years of history
   python run.py test-alert                send a test message to Telegram / WhatsApp
+  python run.py telegram                  read the public Telegram channels now (2-4 minutes, no full scan)
 """
 from __future__ import annotations
 
@@ -169,6 +170,12 @@ def cmd_test_alert(s, args) -> str:
     return "הודעת בדיקה נשלחה ל: " + ", ".join(sent)
 
 
+def cmd_telegram(s, args) -> str:
+    from radar.tgwatch import pull
+
+    return pull(s, Path(args.export) if args.export else None, demo=args.demo)
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description="רדאר מניות – סורק יומי לשוק האמריקאי")
     p.add_argument("--config", default=None, help="נתיב לקובץ הגדרות (ברירת מחדל: config.yaml)")
@@ -192,6 +199,8 @@ def main(argv=None) -> int:
     t.add_argument("--max-tickers", type=int, default=None)
     t.add_argument("--demo", action="store_true")
     sub.add_parser("test-alert", help="שליחת הודעת בדיקה")
+    g = sub.add_parser("telegram", help="משיכה ידנית מערוצי הטלגרם (בלי סריקה מלאה)")
+    g.add_argument("--demo", action="store_true")
     args = p.parse_args(argv)
     s = load_settings(args.config)
     _setup_logging(s.get("general.log_level", "INFO"))
@@ -199,7 +208,7 @@ def main(argv=None) -> int:
         if not hasattr(args, name):
             setattr(args, name, False)
     handler = {"scan": cmd_scan, "ticker": cmd_ticker, "backtest": cmd_backtest, "train": cmd_train,
-               "test-alert": cmd_test_alert}[args.cmd]
+               "test-alert": cmd_test_alert, "telegram": cmd_telegram}[args.cmd]
     mode = args.cmd + ("-demo" if args.demo else "")
     try:
         message = handler(s, args)

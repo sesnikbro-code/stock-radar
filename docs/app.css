@@ -152,6 +152,8 @@ ul.cons li::marker { color: var(--warn); }
 .rows { display: flex; flex-direction: column; }
 .row { display: flex; align-items: center; gap: 10px; padding: 11px 2px; border-top: 1px solid var(--line); cursor: pointer; background: none; border-inline: 0; border-bottom: 0; width: 100%; text-align: start; }
 .row:first-child { border-top: 0; }
+a.row { color: inherit; text-decoration: none; }
+.row .nm.wrap { white-space: normal; }
 .row .grow { flex: 1; min-width: 0; }
 .row .tk { display: block; }
 .row .nm { display: block; font-size: 13.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -375,3 +377,21 @@ ol.steps li::marker { font-weight: 700; color: var(--accent); }
 .s-k { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; font-weight: 700; font-size: 15px; }
 .s-k b { font-size: 17px; }
 .s-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+
+/* ---------- Telegram: connection strip and screen ---------- */
+.tg-strip { display: flex; align-items: center; gap: 10px; width: 100%; text-align: start; font: inherit; color: var(--ink);
+  background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; cursor: pointer; }
+.tg-strip .grow { flex: 1; min-width: 0; }
+.tg-strip b { display: block; font-size: 15px; }
+.tg-strip .grow > span { display: block; font-size: 13px; color: var(--muted); }
+.tg-strip .chev { color: var(--muted); font-size: 24px; line-height: 1; flex: none; }
+.tg-strip .dot, .tg-head .dot { width: 11px; height: 11px; border-radius: 50%; flex: none; background: var(--muted); }
+.tg-strip.good .dot, .tg-head.good .dot { background: var(--good); box-shadow: 0 0 0 4px var(--good-soft); }
+.tg-strip.warn .dot, .tg-head.warn .dot { background: var(--warn); box-shadow: 0 0 0 4px var(--warn-soft); }
+.tg-strip.bad .dot, .tg-head.bad .dot { background: var(--bad); box-shadow: 0 0 0 4px var(--bad-soft); }
+.tg-strip.bad { border-color: var(--bad); }
+.tg-head { display: flex; gap: 12px; align-items: center; }
+.tg-head .grow { flex: 1; min-width: 0; }
+.tg-head b { display: block; font-size: 19px; }
+.sdot { width: 9px; height: 9px; border-radius: 50%; flex: none; background: var(--muted); }
+.sdot.good { background: var(--good); } .sdot.bad { background: var(--bad); }

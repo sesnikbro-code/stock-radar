@@ -68,6 +68,14 @@ NOT_TICKERS = {"CEO", "CFO", "CTO", "COO", "USA", "ETF", "IPO", "GDP", "CPI", "P
                "PLAY", "FAST", "REAL", "BEST", "TRUE", "HOPE", "SAFE", "MAIN", "CASH", "GAIN", "MORE", "WOW", "BIO"}
 
 
+# 3-letter tickers that posts write on their own. Other bare 3-letter capitals in a post are usually acronyms
+# (GIC, the Singapore fund, in a post about the Jio IPO), so those count only as $GIC, (GIC) or "מניית GIC".
+BARE_3 = {"AMD", "IBM", "ARM", "NIO", "UPS", "AIG", "JPM", "TSM", "XOM", "CVX", "LLY", "UNH", "BAC", "PFE", "NKE",
+          "DIS", "ZIM", "WIX", "GME", "AMC", "HPE", "HPQ", "PDD", "CRM", "TXN", "MRK", "ABT", "TMO", "PEP", "WMT",
+          "CVS", "SAP", "RTX", "LMT", "BHP"}
+_EXPLICIT = re.compile(r"\$([A-Z]{1,5})(?![A-Za-z0-9])|\(([A-Z]{2,5})\)")
+
+
 def channel_name(ch) -> str:
     """'@name', 't.me/name' or 'https://t.me/s/name' -> 'name'."""
     return str(ch).strip().rstrip("/").lstrip("@").split("/")[-1]
@@ -145,9 +153,11 @@ def fetch_channel(http: Http, channel: str, days: int = 7, max_pages: int = 12) 
 def _patterns_for(ticker: str, name: str | None) -> list[re.Pattern]:
     pats = list(_HEB_PATTERNS.get(ticker, []))
     t = re.escape(ticker)
-    pats.append(re.compile(rf"\${t}(?![A-Za-z])|\({t}\)"))
-    if len(ticker) >= 3 and ticker not in NOT_TICKERS and "-" not in ticker:
-        pats.append(re.compile(rf"(?<![A-Za-z$]){t}(?![A-Za-z])"))
+    pats.append(re.compile(rf"\${t}(?![A-Za-z])"))
+    if ticker not in NOT_TICKERS:      # '(AI)' after 'בינה מלאכותית' is not C3.ai
+        pats.append(re.compile(rf"\({t}\)|מני(?:י?ת|ות)\s+{t}(?![A-Za-z])"))
+        if "-" not in ticker and (len(ticker) >= 4 or ticker in BARE_3):
+            pats.append(re.compile(rf"(?<![A-Za-z$]){t}(?![A-Za-z])"))
     nm = short_name(name)
     if nm.isupper():   # SEC writes names in capitals; posts write them normally
         nm = nm.title()
@@ -168,7 +178,47 @@ def mentions(posts: list[dict], ticker: str, name: str | None) -> list[dict]:
     out = []
     for p in newest_first(posts):
         if any(pt.search(p["text"]) for pt in pats):
-            head = p["text"].split("\n", 1)[0].strip() or p["text"][:140]
-            out.append({"d": p["date"].isoformat() if p["date"] else None,
-                        "t": head[:140] + ("…" if len(head) > 140 else ""), "u": p["url"], "c": p.get("channel")})
+            out.append({"d": p["date"].isoformat() if p["date"] else None, "t": _headline(p), "u": p["url"],
+                        "c": p.get("channel")})
     return out
+
+
+def _headline(p: dict) -> str:
+    head = p["text"].split("\n", 1)[0].strip() or p["text"][:140]
+    return head[:140] + ("…" if len(head) > 140 else "")
+
+
+def channel_stats(posts: list[dict], channels: list[str]) -> dict:
+    """Per channel: how many posts were read, the dates they span, and the newest one (proof the read was live)."""
+    out = {}
+    for ch in channels:
+        mine = [p for p in posts if p.get("channel") == ch]
+        dated = [p for p in mine if p["date"] is not None]
+        newest = max(dated, key=lambda p: p["date"]) if dated else (mine[0] if mine else None)
+        out[ch] = {"n": len(mine),
+                   "from": min(p["date"] for p in dated).isoformat() if dated else None,
+                   "to": newest["date"].isoformat() if newest and newest["date"] else None,
+                   "last_t": _headline(newest) if newest else None, "last_u": newest["url"] if newest else None}
+    return out
+
+
+def explicit_tickers(posts: list[dict]) -> set[str]:
+    """Tickers written as $TICKER or (TICKER) in the posts (checked against the list of listed companies later)."""
+    found = set()
+    for p in posts:
+        for a, b in _EXPLICIT.findall(p["text"]):
+            if a or b not in NOT_TICKERS:
+                found.add(a or b)
+    return found
+
+
+def week_overview(posts: list[dict], names: dict[str, str], limit: int | None = 40) -> list[dict]:
+    """Every stock in `names` that the channels mentioned, most mentioned first: what was taken from Telegram.
+    'tg' holds the newest 3 posts, 'all' every one of them."""
+    out = []
+    for tk, nm in names.items():
+        got = mentions(posts, tk, nm)
+        if got:
+            out.append({"ticker": tk, "name": nm, "n": len(got), "tg": got[:3], "all": got})
+    out.sort(key=lambda x: (x["n"], x["tg"][0]["d"] or ""), reverse=True)
+    return out[:limit] if limit else out

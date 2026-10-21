@@ -40,6 +40,9 @@ CREATE TABLE IF NOT EXISTS outcomes (
     ret21 REAL, spy21 REAL, PRIMARY KEY (run_date, ticker));
 CREATE TABLE IF NOT EXISTS review_log (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT, kind TEXT, text TEXT);
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS tg_mentions (
+    url TEXT, ticker TEXT, name TEXT, channel TEXT, date TEXT, headline TEXT, seen TEXT, PRIMARY KEY (url, ticker));
+CREATE TABLE IF NOT EXISTS tg_reads (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, mode TEXT, posts INT, per TEXT);
 """
 
 HORIZONS = (30, 90)
@@ -365,3 +368,46 @@ class Journal:
                                   "since": r["entry_date"], "until": r["exit_date"], "reason": r["exit_reason"],
                                   "ret": r["exit_price"] / r["entry_price"] - 1} for r in closed[-30:]][::-1],
         }
+
+    # ------------------------------------------------------------ Telegram channels: what was read and taken
+    def tg_record(self, read_at: str, mode: str, per: dict, mentions: list[dict], keep_days: int = 400) -> int:
+        """Log one read of the channels and every stock mention in it (a post seen again is not counted twice).
+        Returns how many mentions were new."""
+        c = self.conn
+        before = c.total_changes
+        c.executemany("INSERT OR IGNORE INTO tg_mentions VALUES (?,?,?,?,?,?,?)",
+                      [(m["u"], m["ticker"], m.get("name"), m.get("c"), m.get("d"), m.get("t"), read_at)
+                       for m in mentions if m.get("u")])
+        new = c.total_changes - before
+        c.execute("INSERT INTO tg_reads (ts, mode, posts, per) VALUES (?,?,?,?)",
+                  (read_at, mode, int(sum(per.values())), json.dumps(per, ensure_ascii=False)))
+        cutoff = (date.fromisoformat(read_at[:10]) - timedelta(days=keep_days)).isoformat()
+        c.execute("DELETE FROM tg_mentions WHERE COALESCE(date, seen) < ?", (cutoff,))
+        c.execute("DELETE FROM tg_reads WHERE id NOT IN (SELECT id FROM tg_reads ORDER BY id DESC LIMIT 300)")
+        c.commit()
+        return new
+
+    def tg_reads(self, n: int = 30) -> list[dict]:
+        rows = self.conn.execute("SELECT ts, mode, posts, per FROM tg_reads ORDER BY id DESC LIMIT ?", (n,)).fetchall()
+        return [{"ts": ts, "mode": mode, "posts": posts, "per": json.loads(per or "{}")} for ts, mode, posts, per in rows]
+
+    def tg_stocks(self, limit: int = 200) -> dict:
+        """Every stock the channels mentioned since the log started: how often, when, where, and the newest posts."""
+        rows = self.conn.execute("SELECT url, ticker, name, channel, date, headline, seen FROM tg_mentions "
+                                 "ORDER BY COALESCE(date, seen) DESC").fetchall()
+        by: dict[str, dict] = {}
+        for url, tk, name, ch, d, head, seen in rows:
+            x = by.setdefault(tk, {"ticker": tk, "name": name, "n": 0, "first": None, "last": None, "channels": {},
+                                   "tg": []})
+            x["n"] += 1
+            when = d or seen
+            x["last"] = max(x["last"] or when, when)
+            x["first"] = min(x["first"] or when, when)
+            x["channels"][ch] = x["channels"].get(ch, 0) + 1
+            if len(x["tg"]) < 3:
+                x["tg"].append({"d": d, "t": head, "u": url, "c": ch})
+        stocks = sorted(by.values(), key=lambda x: (x["n"], x["last"] or ""), reverse=True)
+        first, reads = self.conn.execute("SELECT MIN(ts), COUNT(*) FROM tg_reads").fetchone()
+        return {"stocks": stocks[:limit], "n_stocks": len(stocks), "n_mentions": len(rows), "since": first,
+                "reads": reads or 0}
+
