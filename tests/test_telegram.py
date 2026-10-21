@@ -87,7 +87,30 @@ class TestTelegram(unittest.TestCase):
             self.assertEqual(res["health"]["telegram"], 2)
             from radar.export import scan_json
             j = scan_json(res)
-            self.assertEqual(j["telegram"]["labels"]["Tisraelnewss"], "ביזנס 10")
+            t = j["telegram"]
+            self.assertEqual(t["labels"]["Tisraelnewss"], "ביזנס 10")
+            self.assertEqual(t["labels"]["weralllocos"], "המשקיע ששוקע")
+            self.assertEqual(t["labels"]["Mivzakhon"], "מבזקהון")
+            self.assertEqual(t["channels"], ["Tisraelnewss", "weralllocos", "Mivzakhon"])
+            self.assertEqual(t["per"], {"Tisraelnewss": 1, "weralllocos": 0, "Mivzakhon": 1})
+            self.assertEqual(t["posts"], 2)
+
+    def test_several_channels(self):
+        self.assertEqual(telegram.channel_name("https://t.me/s/Mivzakhon/"), "Mivzakhon")
+        self.assertEqual(telegram.channel_name("@weralllocos"), "weralllocos")
+        now = datetime.now(timezone.utc)
+        a = [{"id": 5, "date": now - timedelta(days=3), "channel": "A", "text": "נטפליקס מפתיעה", "url": "u/a5"}]
+        b = [{"id": 900, "date": now - timedelta(days=1), "channel": "B", "text": "דוח של נטפליקס", "url": "u/b900"},
+             {"id": 901, "date": now, "channel": "B", "text": "פאלו אלטו (PANW) נכנסת למדד", "url": "u/b901"}]
+        posts = a + b      # one channel after the other, as they were read
+        got = telegram.mentions(posts, "NFLX", "Netflix, Inc.")
+        self.assertEqual([m["u"] for m in got], ["u/b900", "u/a5"])           # newest first across channels
+        self.assertEqual([m["c"] for m in got], ["B", "A"])
+        self.assertEqual(len(telegram.mentions(posts, "PANW", "Palo Alto Networks, Inc.")), 1)
+        politics = [{"id": 1, "date": now, "channel": "C", "text": "סוכני ICE עצרו מפגינים ב-NYC", "url": "u/c1"}]
+        self.assertEqual(telegram.mentions(politics, "ICE", "Intercontinental Exchange, Inc."), [])
+        self.assertEqual(len(telegram.mentions(
+            [{**politics[0], "text": "הבורסה של ICE (ICE) מדווחת על שיא"}], "ICE", "Intercontinental Exchange")), 1)
 
 
 if __name__ == "__main__":

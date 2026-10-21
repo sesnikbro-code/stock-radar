@@ -400,7 +400,11 @@
     if (n >= 10 && news === 0) out.push('לא התקבלו חדשות לאף מניה בסריקה הזו, ולכן אותות החדשות לא פעלו. לבדוק חדשות ידנית.');
     if (res.length && !res.some((r) => 'filings_checked' in r)) out.push('הסריקה הזו מלפני העדכון: בדיקת עסקאות הרכישה תרוץ מהסריקה הבאה.');
     else if (h && n >= 10 && h.filings === 0) out.push('דיווחי SEC לא התקבלו בסריקה הזו, ולכן בדיקת עסקאות הרכישה וההנפקות לא רצה.');
-    if (d.telegram && d.telegram.posts === 0) out.push('ערוץ הטלגרם לא נקרא בסריקה הזו, ולכן האזכורים שם לא מוצגים.');
+    if (d.telegram && d.telegram.posts === 0) out.push('ערוצי הטלגרם לא נקראו בסריקה הזו, ולכן האזכורים שם לא מוצגים.');
+    else if (d.telegram && d.telegram.per) {
+      const miss = Object.keys(d.telegram.per).filter((c) => d.telegram.per[c] === 0);
+      if (miss.length) out.push(`ערוץ הטלגרם ${miss.map((c) => tgLabel(c)).join(', ')} לא נקרא בסריקה הזו (או שלא פרסם השבוע), ולכן האזכורים שם לא מוצגים.`);
+    }
     return out;
   }
   function trustCard(d) {
@@ -652,7 +656,12 @@
       <p class="trust-bottom">${esc(bottom)}</p></section>`;
   }
   // public Telegram channels (e.g. ביזנס 10): shown next to the stock, not part of the score
-  const tgLabel = (c) => { const t = (state.data && state.data.telegram) || {}; return ((t.labels || {})[c]) || 'טלגרם'; };
+  const tgLabel = (c) => { const t = (state.data && state.data.telegram) || {}; return ((t.labels || {})[c]) || c || 'טלגרם'; };
+  function tgNames() {   // the channels this scan read, by their Hebrew names
+    const t = (state.data && state.data.telegram) || {};
+    const list = t.channels || Object.keys(t.labels || {});
+    return list.map((c) => tgLabel(c)).join(', ');
+  }
   function whenText(iso) {
     if (!iso) return '';
     const d = Math.floor(daysSince(iso));
@@ -665,13 +674,13 @@
   function tgCard(r) {
     const list = r.tg || [];
     if (!list.length) {
-      return r.tg_n === 0 ? `<p class="muted small" style="margin:0">לא הוזכרה השבוע בערוץ ${esc(tgLabel(Object.keys(((state.data || {}).telegram || {}).labels || {})[0]))} – עוד לא בכותרות בישראל.</p>` : '';
+      return r.tg_n === 0 ? `<p class="muted small" style="margin:0">לא הוזכרה השבוע בערוצי הטלגרם (${esc(tgNames())}) – עוד לא בכותרות בישראל.</p>` : '';
     }
     return `<div class="card"><h3>בטלגרם</h3>
       <p class="muted small" style="margin:2px 0 8px">${r.tg_n > list.length ? `${N(r.tg_n)} אזכורים בשבוע האחרון, האחרונים:` : 'אזכורים בשבוע האחרון:'}</p>
       <div class="rows">${list.map((x) => `<a class="row" href="${esc(x.u)}" target="_blank" rel="noopener"><span class="grow"><span class="nm" style="white-space:normal;color:var(--ink)">${esc(x.t)}</span>
         <span class="nm">${esc(tgLabel(x.c))} · ${x.d ? dmy(x.d) : ''} · ${whenText(x.d)}</span></span></a>`).join('')}</div>
-      <p class="muted small" style="margin:8px 0 0">הערוץ מסכם בעברית חדשות שכבר פורסמו. אזכור אומר שהמניה כבר בכותרות בישראל – לא שהיא תעלה. הביקורת העצמית בודקת אם מניות שהוזכרו שם הצליחו יותר או פחות.</p></div>`;
+      <p class="muted small" style="margin:8px 0 0">הערוצים מסכמים בעברית חדשות שכבר פורסמו. אזכור אומר שהמניה כבר בכותרות בישראל – לא שהיא תעלה. הביקורת העצמית בודקת אם מניות שהוזכרו שם הצליחו יותר או פחות.</p></div>`;
   }
   function simpleCard(r, i, scanDate) {
     const [rc, rl] = riskLevel(r.risk);

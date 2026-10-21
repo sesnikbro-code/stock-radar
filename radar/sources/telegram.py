@@ -1,4 +1,4 @@
-"""Public Telegram channels (for example ביזנס 10): which stocks the Israeli public is reading about.
+"""Public Telegram channels (ביזנס 10, המשקיע ששוקע, מבזקהון): which stocks the Israeli public is reading about.
 
 A public channel shows its latest posts on the web at t.me/s/<name>, without logging in, so the daily scan reads
 that page directly: no Telegram account, no API keys, no session. Older posts are reached with ?before=<post id>.
@@ -62,7 +62,21 @@ NOT_TICKERS = {"CEO", "CFO", "CTO", "COO", "USA", "ETF", "IPO", "GDP", "CPI", "P
                "NASA", "NATO", "API", "EPS", "ESG", "USD", "EUR", "ILS", "BTC", "ETH", "NYSE", "WTI", "LNG", "FDA",
                "GPU", "CPU", "ALL", "NOW", "ONE", "ARE", "FOR", "NEW", "OPEN", "BIG", "LOW", "KEY", "GOOD", "HAS",
                "CAT", "PAY", "EAT", "SEE", "RUN", "WAY", "AIR", "CAR", "TOP", "HOT", "FUN", "GPS", "ATM", "IRS",
-               "UAE", "EU", "UK", "AI", "TV", "PC", "EV", "IT", "OIL", "BUY", "SELL", "HOLD"}
+               "UAE", "EU", "UK", "AI", "TV", "PC", "EV", "IT", "OIL", "BUY", "SELL", "HOLD",
+               # words that also show up in general news posts (המשקיע ששוקע writes about politics too)
+               "ICE", "IDF", "WHO", "BBC", "CNN", "FBI", "CIA", "NYC", "GOP", "DOGE", "NEWS", "LIVE", "LIFE", "LOVE",
+               "PLAY", "FAST", "REAL", "BEST", "TRUE", "HOPE", "SAFE", "MAIN", "CASH", "GAIN", "MORE", "WOW", "BIO"}
+
+
+def channel_name(ch) -> str:
+    """'@name', 't.me/name' or 'https://t.me/s/name' -> 'name'."""
+    return str(ch).strip().rstrip("/").lstrip("@").split("/")[-1]
+
+
+def newest_first(posts: list[dict]) -> list[dict]:
+    """Posts of several channels in one list, newest first (posts without a date last)."""
+    old = datetime.min.replace(tzinfo=timezone.utc)
+    return sorted(posts, key=lambda p: p["date"] or old, reverse=True)
 
 
 def _name_pattern(name: str) -> re.Pattern:
@@ -152,7 +166,7 @@ def mentions(posts: list[dict], ticker: str, name: str | None) -> list[dict]:
     """Posts that mention the stock, newest first: date, headline (first line, shortened) and link."""
     pats = _patterns_for(ticker, name)
     out = []
-    for p in posts:
+    for p in newest_first(posts):
         if any(pt.search(p["text"]) for pt in pats):
             head = p["text"].split("\n", 1)[0].strip() or p["text"][:140]
             out.append({"d": p["date"].isoformat() if p["date"] else None,

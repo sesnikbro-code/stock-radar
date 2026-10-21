@@ -249,6 +249,15 @@ def _tg_fields(found: list[dict], enabled: bool) -> dict:
     return {"tg": found[:3], "tg_n": len(found) if enabled else None}
 
 
+def _tg_summary(settings, posts: list[dict]) -> dict:
+    """What the app shows about the channels: their Hebrew names and how many posts each one gave this scan."""
+    names = [telegram.channel_name(c) for c in settings.get("telegram.channels") or []]
+    per = {c: 0 for c in names}
+    for p in posts:
+        per[p.get("channel")] = per.get(p.get("channel"), 0) + 1
+    return {"labels": settings.get("telegram.labels") or {}, "channels": names, "per": per, "posts": len(posts)}
+
+
 def data_quality(health: dict) -> list[str]:
     """Reasons the scan's data is too partial to act on (the cloud's backup run tries again later)."""
     n, out = health.get("n") or 0, []
@@ -589,7 +598,7 @@ def run_scan(settings, demo: bool = False, tickers: list[str] | None = None, pro
     journal.close()
     return {"date": today, "ctx": ctx, "results": results, "picks": picks, "weights": weights, "factors": factors,
             "health": health, "review": review, "degraded": degraded, "plan": plan,
-            "telegram": {"labels": settings.get("telegram.labels") or {}, "posts": len(tg_posts)} if tg_on else None,
+            "telegram": _tg_summary(settings, tg_posts) if tg_on else None,
             "pick_mode": "model" if model_mode else "score",
             "band_frac": model.band_frac if model_mode else None,
             "learning": learning, "paper": paper, "n_universe": len(meta), "n_screened": len(tech_df),

@@ -59,9 +59,11 @@ news:
 
 telegram:                  # ערוצי טלגרם ציבוריים: אילו מניות הציבור בישראל קורא עליהן. מוצג ליד המניה, לא משפיע על הציון
   enabled: true
-  channels: [Tisraelnewss] # השם שאחרי t.me/ (אפשר כמה ערוצים, רק ציבוריים)
+  channels: [Tisraelnewss, weralllocos, Mivzakhon] # השם שאחרי t.me/ (אפשר כמה ערוצים, רק ציבוריים)
   labels:
     Tisraelnewss: ביזנס 10
+    weralllocos: המשקיע ששוקע
+    Mivzakhon: מבזקהון
   lookback_days: 7
   max_pages: 12
 

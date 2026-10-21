@@ -144,11 +144,14 @@ class LiveSources:
         """Recent posts of public Telegram channels (read from t.me/s/<name>, no account needed)."""
         out = []
         for ch in channels or []:
+            name = telegram.channel_name(ch)
             try:
-                out += telegram.fetch_channel(self.http, str(ch).strip().lstrip("@").split("/")[-1], days, max_pages)
+                got = telegram.fetch_channel(self.http, name, days, max_pages)
+                log.info("ערוץ הטלגרם %s: %d הודעות", name, len(got))
+                out += got
             except Exception as e:  # noqa: BLE001
                 log.warning("קריאת ערוץ הטלגרם %s נכשלה: %s", ch, e)
-        return out
+        return telegram.newest_first(out)
 
     def classify_news(self, ticker: str, name: str, news: list[dict]):
         if not self.s.get("news.use_llm"):
