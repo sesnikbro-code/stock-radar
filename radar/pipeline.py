@@ -607,7 +607,10 @@ def run_scan(settings, demo: bool = False, tickers: list[str] | None = None, pro
             "learning": learning, "paper": paper, "n_universe": len(meta), "n_screened": len(tech_df),
             "n_deep": len(tds), "demo": demo, "single": bool(tickers),
             "model": _model_summary(model),
-            "spark_dates": [d.strftime("%Y-%m-%d") for d in spark_idx]}
+            "spark_dates": [d.strftime("%Y-%m-%d") for d in spark_idx],
+            # S&P 500 on the same days: the saved-stocks tab compares a stock with the index since it was saved
+            "spy_closes": [None if pd.isna(v) else round(float(v), 4) for v in spy.reindex(spark_idx).values]
+            if spy is not None else []}
 
 
 def _model_summary(model: ProbModel | None) -> dict | None:

@@ -706,13 +706,28 @@
     if (state.sheet && state.sheet.kind === 'detail' && state.sheet.r.ticker === t) return state.sheet.r;
     return null;
   }
+  const lastNum = (a) => { for (let k = (a || []).length - 1; k >= 0; k--) if (isNum(a[k])) return a[k]; return null; };
+  // the scan the stock's numbers came from (today's scan, or its own analysis opened from the search tab)
+  function findCtx(t) {
+    if (state.data && (state.data.results || []).some((x) => x.ticker === t)) return { date: state.data.date, spy_closes: state.data.spy_closes };
+    if (state.sheet && state.sheet.kind === 'detail' && state.sheet.r.ticker === t) return state.sheet.ctx || {};
+    return {};
+  }
+  // how the radar saw the stock at the moment of the star (also kept in the cloud by ci/saved.py)
+  function makeSnap(r, ctx) {
+    const pl = r.plan || {};
+    return { date: ctx.date || null, price: r.price, upside: r.upside, risk: r.risk, stop: pl.stop, target: pl.target,
+      pick: !!r.pick, why_not: r.why_not || null, pros: (r.pros || []).slice(0, 3), cons: (r.cons || []).slice(0, 2),
+      tg_n: r.tg_n, prob: r.prob, earnings_date: r.earnings_date || null, spy: lastNum(ctx.spy_closes), name: r.name };
+  }
   function toggleSave(t) {
     const v = savedGet();
     const i = v.list.findIndex((x) => x.t === t);
     if (i >= 0) { v.list.splice(i, 1); toast(`${t} הוסרה מהשמורות`); }
     else {
       const r = findStock(t) || { ticker: t };
-      v.list.unshift({ t, name: r.name || '', at: new Date().toISOString().slice(0, 10), price: isNum(r.price) ? r.price : null });
+      v.list.unshift({ t, name: r.name || '', at: new Date().toISOString().slice(0, 10), price: isNum(r.price) ? r.price : null,
+        snap: r.upside !== undefined ? makeSnap(r, findCtx(t)) : null });
       toast(`${t} נשמרה בלשונית "שמורות" עד שתמחק אותה`);
     }
     v.updated = Date.now(); v.dirty = true;
@@ -744,18 +759,24 @@
     const mine = v.list.map((x) => x.t);
     const theirs = cloud && Array.isArray(cloud.tickers) ? cloud.tickers : null;
     const same = theirs && theirs.length === mine.length && theirs.every((t) => mine.includes(t));
-    if (theirs && same) { if (v.dirty) { v.dirty = false; store.set('saved', v); } }
-    else if (theirs && !v.dirty) {
-      v.list = theirs.map((t) => v.list.find((x) => x.t === t) || { t, name: '', at: String(cloud.updated || '').slice(0, 10), price: null });
-      store.set('saved', v);
-    } else if (!theirs && mine.length) { v.dirty = true; store.set('saved', v); }
+    const items = (cloud && cloud.items) || {};
+    const fromCloud = (t) => {
+      const it = items[t] || {}, sn = it.snap || null;
+      return { t, name: (sn && sn.name) || '', at: String(it.since || cloud.updated || '').slice(0, 10), price: sn ? sn.price : null, snap: sn };
+    };
+    if (theirs && same) { if (v.dirty) v.dirty = false; }
+    else if (theirs && !v.dirty) v.list = theirs.map((t) => v.list.find((x) => x.t === t) || fromCloud(t));
+    else if (!theirs && mine.length) v.dirty = true;
+    if (theirs && !cloud.items && mine.length) v.dirty = true;   // an older cloud copy without snapshots: send again
+    v.list.forEach((x) => { if (!x.snap && items[x.t] && items[x.t].snap) { x.snap = items[x.t].snap; if (!isNum(x.price)) x.price = x.snap.price; } });
+    store.set('saved', v);
     if (v.dirty && (!v.syncAt || Date.now() - v.syncAt > 15 * 60e3)) syncSaved();
     render();
   }
   async function loadSavedInfo(t) {
     state.savedInfo[t] = null;   // loading
     const f = await getJSON(`tickers/${encodeURIComponent(t)}.json`);
-    state.savedInfo[t] = f && f.result ? { date: f.date, r: f.result, spark_dates: f.spark_dates, demo: f.demo } : false;
+    state.savedInfo[t] = f && f.result ? { date: f.date, r: f.result, spark_dates: f.spark_dates, demo: f.demo, spy_closes: f.spy_closes } : false;
     if (!state.sheet) render();
   }
   function viewSaved() {
@@ -769,40 +790,104 @@
     }
     return `<div class="stack">${head}${savedSection()}</div>`;
   }
+  // a saved stock as it was at the star, and as the radar sees it now (one line per number, no tables)
+  function savedNow(t) {
+    const d = state.data || {};
+    const res = d.results || [];
+    const i = res.findIndex((r) => r.ticker === t);
+    if (i >= 0) return { r: res[i], i, date: d.date, spy: lastNum(d.spy_closes), dates: d.spark_dates };
+    if (state.savedInfo[t] === undefined) loadSavedInfo(t);
+    const info = state.savedInfo[t];
+    if (info) return { r: info.r, i: -1, date: info.date, spy: lastNum(info.spy_closes) || lastNum(d.spy_closes), dates: info.spark_dates, info: true };
+    return null;
+  }
+  const arrow = (a, b, fmt, better) => {
+    if (!isNum(a) && !isNum(b)) return '–';
+    if (!isNum(b) || !isNum(a)) return fmt(isNum(b) ? b : a);
+    const diff = b - a;
+    const cls = Math.abs(diff) < 1e-9 ? '' : (diff > 0) === (better > 0) ? 'up' : 'down';
+    const sign = Math.abs(diff) < 0.5 ? 'בלי שינוי' : diff > 0 ? '▲' : '▼';
+    return `כששמרת ${fmt(a)} · עכשיו <b class="${cls}">${fmt(b)}</b> <span class="${cls}">${sign}</span>`;
+  };
+  const statusText = (x) => (x.pick ? 'נבחרה' : x.why_not && WHY_NOT[String(x.why_not).split(':')[0]] ? `לא נבחרה (${WHY_NOT[String(x.why_not).split(':')[0]]})` : 'לא נבחרה');
+  function savedCard(s) {
+    if (state.unsaveAsk === s.t) {
+      return `<div class="card saved-item"><div class="row" style="cursor:default;border:0"><span class="grow"><b>למחוק את ${esc(s.t)} מהשמורות?</b>
+        <span class="nm wrap">תמונת המצב מהרגע ששמרת תימחק איתה.</span></span>
+        <button class="btn small" data-act="unsave" data-t="${esc(s.t)}">מחק</button><button class="btn small ghost" data-act="unsave-no">ביטול</button></div></div>`;
+    }
+    const sn = s.snap || null;
+    const now = savedNow(s.t);
+    const r = now && now.r;
+    const name = (r && r.name) || (sn && sn.name) || s.name;
+    const p0 = sn && isNum(sn.price) ? sn.price : s.price;
+    const sameDay = sn && now && sn.date && sn.date === now.date;
+    const lines = [];
+    // price, and the S&P 500 over the same days
+    if (r && isNum(p0) && isNum(r.price) && !sameDay) {
+      const chg = r.price / p0 - 1;
+      lines.push(['מחיר', `${price(p0)} כששמרת · עכשיו ${price(r.price)} <b class="${chg >= 0 ? 'up' : 'down'}">${pct(chg, 1, true)}</b>`]);
+      if (sn && isNum(sn.spy) && isNum(now.spy)) {
+        const spy = now.spy / sn.spy - 1;
+        const ex = chg - spy;
+        lines.push(['מול S&P 500', `המדד באותם ימים ${pct(spy, 1, true)} · המניה <b class="${ex >= 0 ? 'up' : 'down'}">${ex >= 0 ? 'הקדימה' : 'פיגרה אחרי'} את המדד ב־${pct(Math.abs(ex), 1)}</b>`]);
+      }
+    } else if (isNum(p0)) lines.push(['מחיר', `${price(p0)} כששמרת`]);
+    if (sn && r && !sameDay) {
+      lines.push(['פוטנציאל', arrow(sn.upside, r.upside, (x) => `<span class="num">${Math.round(x)}</span>`, 1)]);
+      lines.push(['סיכון', arrow(sn.risk, r.risk, (x) => `<span class="num">${Math.round(x)}</span> ${riskLevel(x)[1]}`, -1)]);
+      if (now.i >= 0) {
+        const was = statusText(sn), is = statusText(r);
+        lines.push(['מצב', was === is ? `${esc(is)} – גם כששמרת וגם היום` : `כששמרת: ${esc(was)} · היום: <b>${esc(is)}</b>`]);
+      }
+      if (isNum(sn.tg_n) || isNum(r.tg_n)) lines.push(['טלגרם', `${N(sn.tg_n || 0)} אזכורים בשבוע ששמרת · ${N(r.tg_n || 0)} בשבוע האחרון`]);
+    } else if (sn) {
+      lines.push(['פוטנציאל', `<span class="num">${Math.round(sn.upside)}</span>`]);
+      lines.push(['סיכון', `<span class="num">${Math.round(sn.risk)}</span> ${riskLevel(sn.risk)[1]}`]);
+      lines.push(['מצב', esc(statusText(sn))]);
+    }
+    // the plan suggested at the star: where the price is now against it
+    if (sn && (isNum(sn.stop) || isNum(sn.target))) {
+      const closes = (r && now.i >= 0 && r.closes) || [], dates = (now && now.dates) || [];
+      const after = dates.map((dt, k) => [dt, closes[k]]).filter(([dt, c]) => isNum(c) && sn.date && dt > sn.date);
+      const hitStop = isNum(sn.stop) ? after.find(([, c]) => c <= sn.stop) : null;
+      const hitTgt = isNum(sn.target) ? after.find(([, c]) => c >= sn.target) : null;
+      const parts = [];
+      if (isNum(sn.stop)) {
+        parts.push(hitStop ? `סטופ ${price(sn.stop)}: <b class="down">נסגרה מתחתיו ב־${dm(hitStop[0])}</b>`
+          : r && !sameDay ? `סטופ ${price(sn.stop)}: המחיר ${pct(r.price / sn.stop - 1, 0)} מעליו` : `סטופ ${price(sn.stop)}`);
+      }
+      if (isNum(sn.target)) {
+        parts.push(hitTgt ? `יעד ${price(sn.target)}: <b class="up">הגיעה אליו ב־${dm(hitTgt[0])}</b>`
+          : r && !sameDay ? `יעד ${price(sn.target)}: עוד ${pct(sn.target / r.price - 1, 0, true)}` : `יעד ${price(sn.target)}`);
+      }
+      lines.push(['התוכנית כששמרת', parts.join(' · ')]);
+    }
+    if (sn && sn.earnings_date && sn.earnings_date >= String(now ? now.date : sn.date)) lines.push(['דוח רבעוני', dmy(sn.earnings_date)]);
+    const head = `${sn && sn.date ? `תמונת מצב מהסריקה של ${dm(sn.date)}` : `נשמרה ב־${dm(s.at)}`}${s.at ? ` · שמרת ${ago(s.at + 'T12:00:00Z') === 'עכשיו' ? 'היום' : ago(s.at + 'T12:00:00Z')}` : ''}`;
+    const nowLine = !now ? '<span class="chip warn">אין עדיין ניתוח חדש – הסריקה הבאה תנתח אותה</span>'
+      : sameDay ? '<span class="chip">נשמרה מהסריקה האחרונה – ההשוואה תתחיל מהסריקה הבאה</span>'
+        : now.info ? `<span class="chip">עכשיו = הניתוח מ־${dm(now.date)}</span>` : `<span class="chip">עכשיו = הסריקה של ${dm(now.date)}</span>`;
+    const open = now ? (now.i >= 0 ? `data-open="${now.i}"` : `data-act="open-saved" data-t="${esc(s.t)}"`) : '';
+    return `<div class="card saved-item">
+      <div class="saved-top"><div class="grow"><span class="tk">${esc(s.t)}</span>${name ? ` <span class="nm"><bdi>${esc(name)}</bdi></span>` : ''}
+        <div class="muted small">${head}</div></div>
+        <button class="icon-btn small x-btn" data-act="unsave-ask" data-t="${esc(s.t)}" aria-label="מחק את ${esc(s.t)} מהשמורות">✕</button></div>
+      <div class="chips" style="margin:6px 0 4px">${nowLine}</div>
+      <div class="snap-lines">${lines.map(([k, v]) => `<div class="snap-line"><span class="k">${esc(k)}:</span> ${v}</div>`).join('')}</div>
+      ${sn && (sn.pros || []).length ? `<details class="snap-why"><summary>למה הרדאר אהב אותה כששמרת</summary><ul class="list pros">${sn.pros.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>
+        ${(sn.cons || []).length ? `<ul class="list cons">${sn.cons.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}</details>` : ''}
+      <div class="s-actions" style="justify-content:flex-start;margin-top:8px">
+        ${open ? `<button class="btn small ghost" ${open}>המצב המלא עכשיו</button>` : ''}
+        ${!now && cloudReady() ? `<button class="btn small ghost" data-run="ticker" data-sym="${esc(s.t)}">נתח עכשיו</button>` : ''}</div>
+    </div>`;
+  }
   function savedSection() {
     const v = savedGet();
-    const res = (state.data && state.data.results) || [];
-    const rows = v.list.map((s) => {
-      if (state.unsaveAsk === s.t) {
-        return `<div class="row" style="cursor:default"><span class="grow"><b>למחוק את ${esc(s.t)} מהשמורות?</b></span>
-          <button class="btn small" data-act="unsave" data-t="${esc(s.t)}">מחק</button><button class="btn small ghost" data-act="unsave-no">ביטול</button></div>`;
-      }
-      const i = res.findIndex((r) => r.ticker === s.t);
-      const r = i >= 0 ? res[i] : null;
-      let info = null;
-      if (!r) {
-        if (state.savedInfo[s.t] === undefined) loadSavedInfo(s.t);
-        info = state.savedInfo[s.t] || null;
-      }
-      const rr = r || (info && info.r);
-      const since = rr && isNum(rr.price) && isNum(s.price) && s.price > 0 ? rr.price / s.price - 1 : null;
-      const status = r ? (r.pick ? '<span class="chip good">בחירה של היום</span>' : `<span class="chip">נסרקה היום${WHY_NOT[r.why_not] ? ` · ${esc(WHY_NOT[r.why_not])}` : ''}</span>`)
-        : info ? `<span class="chip">נותחה ב־${dm(info.date)}</span>` : '<span class="chip warn">לא נסרקה היום</span>';
-      const line = rr
-        ? `פוטנציאל <b class="num">${Math.round(rr.upside)}</b> · סיכון <b class="num">${Math.round(rr.risk)}</b> · ${price(rr.price)}${since !== null ? ` · <span class="${since >= 0 ? 'up' : 'down'}">${pct(since, 1, true)}</span> מאז ששמרת` : ''}`
-        : `נשמרה ב־${dm(s.at)}${isNum(s.price) ? ` במחיר ${price(s.price)}` : ''}. הסריקה הבאה תנתח אותה.`;
-      const open = r ? `data-open="${i}"` : info ? `data-act="open-saved" data-t="${esc(s.t)}"` : '';
-      const name = (rr && rr.name) || s.name;
-      return `<div class="row saved-row" ${open} ${open ? 'role="button" tabindex="0"' : 'style="cursor:default"'}>
-        <span class="grow"><span class="tk">${esc(s.t)}</span>${name ? ` <span class="nm"><bdi>${esc(name)}</bdi></span>` : ''}
-          <span class="nm wrap">${line}</span>
-          <span class="chips" style="margin-top:4px">${status}${!rr && cloudReady() ? `<button class="chip" style="border:0;cursor:pointer" data-run="ticker" data-sym="${esc(s.t)}">נתח עכשיו</button>` : ''}</span></span>
-        <button class="icon-btn small x-btn" data-act="unsave-ask" data-t="${esc(s.t)}" aria-label="מחק את ${esc(s.t)} מהשמורות">✕</button></div>`;
-    }).join('');
     const sync = !cloudReady() ? 'שמורות בטלפון הזה. כדי שהסריקה היומית תנתח אותן כל בוקר – חיבור לענן בהגדרות.'
       : v.dirty ? 'השינוי נשלח לענן. מהסריקה הבאה הסריקה היומית תנתח אותן.' : 'הסריקה היומית מנתחת אותן כל בוקר, גם כשהן לא נבחרות.';
-    return `<p class="muted small" style="margin:-6px 0 0">${sync}${state.data ? ` הנתונים מהסריקה של ${dmy(state.data.date)}.` : ''}</p>
-      <div class="card saved-card"><div class="rows">${rows}</div></div>`;
+    return `<p class="muted small" style="margin:-6px 0 0">בכל מניה: איך הרדאר ראה אותה ברגע ששמרת, ואיך הוא רואה אותה עכשיו. ${sync}</p>
+      ${v.list.map(savedCard).join('')}`;
   }
   // ---------------------------------------------------------------- Telegram: connection strip, screen, manual pull
   async function loadTg() {
@@ -1392,9 +1477,9 @@
     if (!sym) return;
     const res = (state.data && state.data.results) || [];
     const i = res.findIndex((r) => r.ticker === sym);
-    if (i >= 0) { openDetail(res[i], { spark_dates: state.data.spark_dates, date: state.data.date, demo: state.demo }); return; }
+    if (i >= 0) { openDetail(res[i], { spark_dates: state.data.spark_dates, date: state.data.date, demo: state.demo, spy_closes: state.data.spy_closes }); return; }
     const f = await getJSON(`${state.demo ? 'demo/' : ''}tickers/${encodeURIComponent(sym)}.json`);
-    if (f && f.result) { openDetail(f.result, { spark_dates: f.spark_dates, date: f.date, demo: f.demo }); return; }
+    if (f && f.result) { openDetail(f.result, { spark_dates: f.spark_dates, date: f.date, demo: f.demo, spy_closes: f.spy_closes || (state.data && state.data.spy_closes) }); return; }
     state.searchMsg = { kind: 'missing', sym };
     render();
   }
@@ -1856,7 +1941,7 @@
     }
     if (t.dataset.open != null && state.data) {
       const r = state.data.results[+t.dataset.open];
-      openDetail(r, { spark_dates: state.data.spark_dates, date: state.data.date, demo: state.demo });
+      openDetail(r, { spark_dates: state.data.spark_dates, date: state.data.date, demo: state.demo, spy_closes: state.data.spy_closes });
       return;
     }
     if (t.dataset.period) { state.sheet.period = +t.dataset.period; renderSheet(true); return; }
@@ -1880,7 +1965,7 @@
     else if (act === 'unsave-no') { state.unsaveAsk = null; render(); }
     else if (act === 'open-saved') {
       const info = state.savedInfo[t.dataset.t];
-      if (info) openDetail(info.r, { spark_dates: info.spark_dates, date: info.date, demo: info.demo });
+      if (info) openDetail(info.r, { spark_dates: info.spark_dates, date: info.date, demo: info.demo, spy_closes: info.spy_closes });
     }
     else if (act === 'tg-howto') { state.sheet.howto = true; renderSheet(true); }
     else if (act === 'tg-all') { state.sheet.allTg = true; renderSheet(true); }

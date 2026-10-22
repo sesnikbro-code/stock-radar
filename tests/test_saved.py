@@ -29,6 +29,27 @@ class TestSaved(unittest.TestCase):
             saved.main([], out)                                   # the list was emptied in the app
             self.assertEqual(json.loads(out.read_text(encoding="utf-8"))["tickers"], [])
 
+    def test_keeps_a_snapshot_from_when_it_was_saved(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / "saved.json"
+            latest = {"date": "2026-10-21", "spy_closes": [600.0, None, 610.5],
+                      "results": [{"ticker": "PRCH", "name": "Porch", "price": 18.18, "upside": 75, "risk": 21,
+                                   "pick": True, "why_not": None, "pros": ["a", "b", "c", "d"], "cons": ["x"],
+                                   "tg_n": 0, "plan": {"stop": 16.15, "target": 24.26}}]}
+            (Path(d) / "latest.json").write_text(json.dumps(latest), encoding="utf-8")
+            saved.main(["PRCH", "NVDA"], out)
+            snap = json.loads(out.read_text(encoding="utf-8"))["items"]["PRCH"]["snap"]
+            self.assertEqual((snap["price"], snap["upside"], snap["stop"], snap["spy"]), (18.18, 75, 16.15, 610.5))
+            self.assertEqual(snap["pros"], ["a", "b", "c"])
+            first = json.loads(out.read_text(encoding="utf-8"))["items"]["PRCH"]["since"]
+            latest["results"][0]["price"] = 30.0                  # a later scan
+            (Path(d) / "latest.json").write_text(json.dumps(latest), encoding="utf-8")
+            saved.main(["PRCH", "NVDA", "CBRL"], out)
+            items = json.loads(out.read_text(encoding="utf-8"))["items"]
+            self.assertEqual(items["PRCH"]["snap"]["price"], 18.18)   # the first snapshot is kept
+            self.assertEqual(items["PRCH"]["since"], first)
+            self.assertIsNone(items["NVDA"]["snap"])                  # nothing known about it yet
+
     def test_scan_analyses_saved_stocks(self):
         with tempfile.TemporaryDirectory() as d:
             s = load_settings(root=ROOT)

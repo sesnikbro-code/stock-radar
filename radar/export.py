@@ -111,6 +111,7 @@ def scan_json(res: dict) -> dict:
         "countries": [{"iso": iso, "he": COUNTRY_HE.get(iso, iso), "score": c["score"], "text": c["reasons"]}
                       for iso, c in ctx.countries.items()],
         "spark_dates": res.get("spark_dates", []),
+        "spy_closes": res.get("spy_closes", []),
         "results": [result_json(r) for r in res["results"]],
         "paper": res.get("paper") or {"n": 0},
         "learning": learning,
@@ -161,7 +162,8 @@ def export_tickers(res: dict, out_dir: Path) -> list[Path]:
         p = out_dir / f"{r['ticker']}.json"
         _write(p, {"schema": SCHEMA, "date": day, "demo": bool(res.get("demo")),
                    "generated": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                   "spark_dates": res.get("spark_dates", []), "result": result_json(r)})
+                   "spark_dates": res.get("spark_dates", []), "spy_closes": res.get("spy_closes", []),
+                   "result": result_json(r)})
         paths.append(p)
     idx = [x for x in _read(out_dir / "index.json", {"tickers": []}).get("tickers", [])
            if x["ticker"] not in {r["ticker"] for r in res["results"]}]

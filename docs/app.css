@@ -417,3 +417,13 @@ ol.steps li::marker { font-weight: 700; color: var(--accent); }
 .nav-badge { position: absolute; top: 6px; inset-inline-start: calc(50% + 6px); min-width: 18px; height: 18px; padding: 0 5px;
   border-radius: 9px; background: #d79b00; color: #fff; font: 700 11px/18px var(--font-data, inherit); text-align: center; }
 .saved-star.big svg { width: 34px; height: 34px; }
+.saved-item { border-color: color-mix(in srgb, #d79b00 40%, var(--line)); }
+.saved-top { display: flex; gap: 10px; align-items: flex-start; }
+.saved-top .grow { flex: 1; min-width: 0; }
+.saved-top .tk { font: 600 18px/1.2 var(--font-data); }
+.saved-top .nm { color: var(--muted); font-size: 14px; }
+.snap-lines { display: grid; gap: 7px; margin-top: 6px; }
+.snap-line { font-size: 14px; line-height: 1.5; }
+.snap-line .k { color: var(--muted); font-weight: 600; }
+.snap-why { margin-top: 10px; font-size: 14px; }
+.snap-why summary { cursor: pointer; color: var(--accent); }
