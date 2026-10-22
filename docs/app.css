@@ -413,3 +413,7 @@ ol.steps li::marker { font-weight: 700; color: var(--accent); }
 .saved-hint { display: flex; align-items: center; gap: 6px; margin: 0; }
 .saved-row .x-btn { width: 34px; height: 34px; font-size: 15px; color: var(--muted); flex: none; }
 .saved-row .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.nav button { position: relative; }
+.nav-badge { position: absolute; top: 6px; inset-inline-start: calc(50% + 6px); min-width: 18px; height: 18px; padding: 0 5px;
+  border-radius: 9px; background: #d79b00; color: #fff; font: 700 11px/18px var(--font-data, inherit); text-align: center; }
+.saved-star.big svg { width: 34px; height: 34px; }

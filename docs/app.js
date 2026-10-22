@@ -67,6 +67,7 @@
   // ------------------------------------------------------------------ icons
   const ICON = {
     star: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M12 3.5l2.6 5.3 5.8.8-4.2 4.1 1 5.8L12 16.8l-5.2 2.7 1-5.8-4.2-4.1 5.8-.8z"/></svg>',
+    saved: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M12 3.5l2.6 5.3 5.8.8-4.2 4.1 1 5.8L12 16.8l-5.2 2.7 1-5.8-4.2-4.1 5.8-.8z"/></svg>',
     starOn: '<svg viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M12 3.5l2.6 5.3 5.8.8-4.2 4.1 1 5.8L12 16.8l-5.2 2.7 1-5.8-4.2-4.1 5.8-.8z"/></svg>',
     today: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><path d="M12 12l6-6"/><circle cx="15.5" cy="9" r="1.2" fill="currentColor" stroke="none"/></svg>',
     market: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.6 2.6 3.8 5.6 3.8 9s-1.2 6.4-3.8 9c-2.6-2.6-3.8-5.6-3.8-9S9.4 5.6 12 3z"/></svg>',
@@ -613,7 +614,6 @@
       ${statusBanners()}
       ${whatsNew()}
       ${tgStrip()}
-      ${savedSection()}
       ${trustCard(d)}
       <div class="strip">
         <button class="pill ${mk}" data-tab="market"><span class="sw"></span>שוק ${esc(m.label || '')}</button>
@@ -713,7 +713,7 @@
     else {
       const r = findStock(t) || { ticker: t };
       v.list.unshift({ t, name: r.name || '', at: new Date().toISOString().slice(0, 10), price: isNum(r.price) ? r.price : null });
-      toast(`${t} נשמרה – תופיע למעלה במסך "היום" עד שתמחק אותה`);
+      toast(`${t} נשמרה בלשונית "שמורות" עד שתמחק אותה`);
     }
     v.updated = Date.now(); v.dirty = true;
     store.set('saved', v);
@@ -755,16 +755,23 @@
   async function loadSavedInfo(t) {
     state.savedInfo[t] = null;   // loading
     const f = await getJSON(`tickers/${encodeURIComponent(t)}.json`);
-    state.savedInfo[t] = f && f.result ? { date: f.date, r: f.result } : false;
+    state.savedInfo[t] = f && f.result ? { date: f.date, r: f.result, spark_dates: f.spark_dates, demo: f.demo } : false;
     if (!state.sheet) render();
+  }
+  function viewSaved() {
+    const v = savedGet();
+    if (state.loading) return loader();
+    const head = `<div class="section-title"><h2>המניות השמורות שלי</h2>${v.list.length ? `<span class="muted small">${N(v.list.length)} מניות</span>` : ''}</div>`;
+    if (!v.list.length) {
+      return `<div class="stack">${head}<div class="card empty"><span class="saved-star big">${ICON.starOn}</span>
+        <h3>עוד לא שמרת מניות</h3>
+        <p>לחיצה על הכוכב ${ICON.star.replace('<svg', '<svg width="16" height="16" style="vertical-align:-3px"')} ליד מניה – בכרטיס במסך "היום" או בראש המסך של המניה – שומרת אותה כאן. היא נשארת עד שתמחק אותה, גם כשהרדאר לא בוחר או לא מציג אותה.</p></div></div>`;
+    }
+    return `<div class="stack">${head}${savedSection()}</div>`;
   }
   function savedSection() {
     const v = savedGet();
-    if (!state.data) return '';
-    if (!v.list.length) {
-      return `<p class="muted small saved-hint">${ICON.star.replace('<svg', '<svg width="15" height="15"')} לחיצה על הכוכב ליד מניה שומרת אותה כאן, עד שתמחק אותה.</p>`;
-    }
-    const res = state.data.results || [];
+    const res = (state.data && state.data.results) || [];
     const rows = v.list.map((s) => {
       if (state.unsaveAsk === s.t) {
         return `<div class="row" style="cursor:default"><span class="grow"><b>למחוק את ${esc(s.t)} מהשמורות?</b></span>
@@ -784,7 +791,7 @@
       const line = rr
         ? `פוטנציאל <b class="num">${Math.round(rr.upside)}</b> · סיכון <b class="num">${Math.round(rr.risk)}</b> · ${price(rr.price)}${since !== null ? ` · <span class="${since >= 0 ? 'up' : 'down'}">${pct(since, 1, true)}</span> מאז ששמרת` : ''}`
         : `נשמרה ב־${dm(s.at)}${isNum(s.price) ? ` במחיר ${price(s.price)}` : ''}. הסריקה הבאה תנתח אותה.`;
-      const open = r ? `data-open="${i}"` : info ? `data-act="find" data-sym="${esc(s.t)}"` : '';
+      const open = r ? `data-open="${i}"` : info ? `data-act="open-saved" data-t="${esc(s.t)}"` : '';
       const name = (rr && rr.name) || s.name;
       return `<div class="row saved-row" ${open} ${open ? 'role="button" tabindex="0"' : 'style="cursor:default"'}>
         <span class="grow"><span class="tk">${esc(s.t)}</span>${name ? ` <span class="nm"><bdi>${esc(name)}</bdi></span>` : ''}
@@ -794,9 +801,8 @@
     }).join('');
     const sync = !cloudReady() ? 'שמורות בטלפון הזה. כדי שהסריקה היומית תנתח אותן כל בוקר – חיבור לענן בהגדרות.'
       : v.dirty ? 'השינוי נשלח לענן. מהסריקה הבאה הסריקה היומית תנתח אותן.' : 'הסריקה היומית מנתחת אותן כל בוקר, גם כשהן לא נבחרות.';
-    return `<div class="card saved-card"><div class="saved-title"><span class="saved-star">${ICON.starOn}</span><h3>השמורות שלי (${N(v.list.length)})</h3></div>
-      <p class="muted small" style="margin:2px 0 6px">${sync}</p>
-      <div class="rows">${rows}</div></div>`;
+    return `<p class="muted small" style="margin:-6px 0 0">${sync}${state.data ? ` הנתונים מהסריקה של ${dmy(state.data.date)}.` : ''}</p>
+      <div class="card saved-card"><div class="rows">${rows}</div></div>`;
   }
   // ---------------------------------------------------------------- Telegram: connection strip, screen, manual pull
   async function loadTg() {
@@ -954,7 +960,7 @@
     const res = d.results || [];
     const picks = res.map((r, i) => [r, i]).filter(([r]) => r.pick);
     return `<div class="stack">
-      ${statusBanners()}${whatsNew()}${tgStrip()}${savedSection()}${scoreboard(d)}
+      ${statusBanners()}${whatsNew()}${tgStrip()}${scoreboard(d)}
       <div class="section-title"><h2>המניות של היום</h2><span class="muted small">${dmy(d.date)}</span></div>
       <p class="muted small" style="margin:-6px 0 0">הרדאר מראה אצל אילו מניות יש היום הכי הרבה סימנים לעלייה – לא האם הן יעלו. כל מניה כאן כבר עברה את הסינון. מסתכלים על ארבעה דברים: פוטנציאל, סיכון, הסיבות והסטופ. בלי סטופ אין תוכנית.</p>
       ${picks.length ? picks.map(([r, i]) => simpleCard(r, i, d.date)).join('') : '<div class="card empty">אף מניה לא עברה היום את הסינון. זה תקין – לפעמים הדבר הנכון הוא לחכות.</div>'}
@@ -1745,13 +1751,13 @@
   // ------------------------------------------------------------------ shell
   function loader() { return `<div class="loader"><div class="sweep"></div><span>טוען את הסריקה…</span></div>`; }
   const navTabs = () => (state.view === 'simple'
-    ? [['today', 'היום'], ['results', 'תוצאות'], ['search', 'חיפוש']]
-    : [['today', 'היום'], ['market', 'שוק'], ['perf', 'ביצועים'], ['learn', 'למידה'], ['search', 'חיפוש']]);
-  const TABS = ['today', 'market', 'perf', 'learn', 'results', 'search'];
+    ? [['today', 'היום'], ['saved', 'שמורות'], ['results', 'תוצאות'], ['search', 'חיפוש']]
+    : [['today', 'היום'], ['saved', 'שמורות'], ['market', 'שוק'], ['perf', 'ביצועים'], ['learn', 'למידה'], ['search', 'חיפוש']]);
+  const TABS = ['today', 'saved', 'market', 'perf', 'learn', 'results', 'search'];
   function setView(v) {
     state.view = v;
     store.set('view', v);
-    if (v === 'simple' && !['today', 'results', 'search'].includes(state.tab)) state.tab = 'today';
+    if (v === 'simple' && !['today', 'saved', 'results', 'search'].includes(state.tab)) state.tab = 'today';
     if (v === 'full' && state.tab === 'results') state.tab = 'today';
     const sheet = state.sheet;
     shell();
@@ -1768,7 +1774,7 @@
       </div></header>
       <main id="main"></main>
       <nav class="nav" aria-label="ניווט"><div class="nav-in">
-        ${navTabs().map(([k, l]) => `<button data-tab="${k}">${ICON[k]}<span>${l}</span></button>`).join('')}
+        ${navTabs().map(([k, l]) => `<button data-tab="${k}">${ICON[k]}<span>${l}</span>${k === 'saved' ? '<b class="nav-badge" hidden></b>' : ''}</button>`).join('')}
       </div></nav>
       <section class="sheet" id="sheet" hidden></section>
       <div id="modal-root"></div>
@@ -1777,8 +1783,10 @@
   function render() {
     charts.clear();
     const main = document.getElementById('main');
-    const views = { today: viewToday, market: viewMarket, perf: viewPerf, learn: viewLearn, results: viewResults, search: viewSearch };
-    main.innerHTML = views[state.tab]();
+    const views = { today: viewToday, saved: viewSaved, market: viewMarket, perf: viewPerf, learn: viewLearn, results: viewResults, search: viewSearch };
+    main.innerHTML = (views[state.tab] || viewToday)();
+    const badge = document.querySelector('.nav-badge');
+    if (badge) { const n = savedGet().list.length; badge.textContent = n; badge.hidden = !n; }
     document.querySelectorAll('.nav button').forEach((b) => b.setAttribute('aria-current', b.dataset.tab === state.tab ? 'page' : 'false'));
     const lbl = document.getElementById('day-lbl');
     if (lbl) lbl.textContent = state.data ? dm(state.viewing || state.data.date) : '–';
@@ -1870,6 +1878,10 @@
     else if (act === 'unsave-ask') { state.unsaveAsk = t.dataset.t; render(); }
     else if (act === 'unsave') toggleSave(t.dataset.t);
     else if (act === 'unsave-no') { state.unsaveAsk = null; render(); }
+    else if (act === 'open-saved') {
+      const info = state.savedInfo[t.dataset.t];
+      if (info) openDetail(info.r, { spark_dates: info.spark_dates, date: info.date, demo: info.demo });
+    }
     else if (act === 'tg-howto') { state.sheet.howto = true; renderSheet(true); }
     else if (act === 'tg-all') { state.sheet.allTg = true; renderSheet(true); }
     else if (act === 'pm-show') { state.pmShow = t.dataset.k || 'all'; state.pmAll = false; render(); }
