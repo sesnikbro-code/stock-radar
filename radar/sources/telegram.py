@@ -53,6 +53,8 @@ HEB_NAMES = {
     "ORA": ["אורמת"], "ENLT": ["אנלייט"], "SEDG": ["סולאראדג'", "סולאר אדג'"], "INMD": ["אינמוד"],
     "ZIM": ["צים"], "LMND": ["למונייד"], "CLBT": ["סלברייט"], "PAYO": ["פיוניר"], "INVZ": ["אינוויז"],
     "SPNS": ["ספיינס"], "NNOX": ["נאנו-אקס", "נאנו אקס"], "KRNT": ["קורנית"], "ICL": ["איי.סי.אל"],
+    "NOC": ["נורת'רופ גרומן", "נורת'רופ"], "GD": ["ג'נרל דיינמיקס"], "DASH": ["דורדאש"], "ALOT": ["אלוט"],
+    "IONQ": ["איונקיו"], "LHX": ["L3Harris"], "HON": ["האניוול"], "CRWV": ["קורוויב"],
 }
 # English names that differ from the company's legal name
 EN_ALIASES = {"TSMC": "TSM", "Nvidia": "NVDA", "Google": "GOOGL", "Alphabet": "GOOGL", "Facebook": "META",
@@ -73,7 +75,7 @@ NOT_TICKERS = {"CEO", "CFO", "CTO", "COO", "USA", "ETF", "IPO", "GDP", "CPI", "P
 BARE_3 = {"AMD", "IBM", "ARM", "NIO", "UPS", "AIG", "JPM", "TSM", "XOM", "CVX", "LLY", "UNH", "BAC", "PFE", "NKE",
           "DIS", "ZIM", "WIX", "GME", "AMC", "HPE", "HPQ", "PDD", "CRM", "TXN", "MRK", "ABT", "TMO", "PEP", "WMT",
           "CVS", "SAP", "RTX", "LMT", "BHP"}
-_EXPLICIT = re.compile(r"\$([A-Z]{1,5})(?![A-Za-z0-9])|\(([A-Z]{2,5})\)")
+_EXPLICIT = re.compile(r"\$([A-Z]{1,5})(?![A-Za-z0-9])|\(([A-Z]{2,5})\)|סימול:?\s+([A-Z]{1,5})(?![A-Za-z])")
 
 
 def channel_name(ch) -> str:
@@ -127,17 +129,25 @@ def parse_page(text: str, channel: str) -> list[dict]:
     return out
 
 
-def fetch_channel(http: Http, channel: str, days: int = 7, max_pages: int = 12) -> list[dict]:
-    """Posts of the last `days` days (newest first). Stops early when the page has nothing older."""
+def fetch_channel(http: Http, channel: str, days: int = 7, max_pages: int = 12, info: dict | None = None) -> list[dict]:
+    """Posts of the last `days` days (newest first). Stops early when the page has nothing older.
+    `info` gets whether the channel answered and the date of its newest post, so a channel that simply posted
+    nothing this week is not shown as broken."""
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     posts: dict[int, dict] = {}
     before = None
+    info = info if info is not None else {}
+    info.update(ok=False, newest=None)
     for _ in range(max_pages):
         params = {"before": before} if before else None
         page = http.get(BASE + channel, params=params, ttl=1800, retries=1)
         items = parse_page(page or "", channel)
         if not items:
             break
+        info["ok"] = True
+        dated = [p["date"] for p in items if p["date"] is not None]
+        if dated and (info["newest"] is None or max(dated).isoformat() > info["newest"]):
+            info["newest"] = max(dated).isoformat()
         for p in items:
             posts[p["id"]] = p
         oldest = min(items, key=lambda p: p["id"])
@@ -155,7 +165,7 @@ def _patterns_for(ticker: str, name: str | None) -> list[re.Pattern]:
     t = re.escape(ticker)
     pats.append(re.compile(rf"\${t}(?![A-Za-z])"))
     if ticker not in NOT_TICKERS:      # '(AI)' after 'בינה מלאכותית' is not C3.ai
-        pats.append(re.compile(rf"\({t}\)|מני(?:י?ת|ות)\s+{t}(?![A-Za-z])"))
+        pats.append(re.compile(rf"\({t}\)|(?:מני(?:י?ת|ות)|סימול:?)\s+{t}(?![A-Za-z])"))
         if "-" not in ticker and (len(ticker) >= 4 or ticker in BARE_3):
             pats.append(re.compile(rf"(?<![A-Za-z$]){t}(?![A-Za-z])"))
     nm = short_name(name)
@@ -206,9 +216,9 @@ def explicit_tickers(posts: list[dict]) -> set[str]:
     """Tickers written as $TICKER or (TICKER) in the posts (checked against the list of listed companies later)."""
     found = set()
     for p in posts:
-        for a, b in _EXPLICIT.findall(p["text"]):
-            if a or b not in NOT_TICKERS:
-                found.add(a or b)
+        for a, b, c in _EXPLICIT.findall(p["text"]):
+            if a or (b or c) not in NOT_TICKERS:
+                found.add(a or b or c)
     return found
 
 

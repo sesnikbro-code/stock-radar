@@ -272,6 +272,15 @@ class TestSignals(unittest.TestCase):
         o = options_signal({"call_vol": 5000, "put_vol": 500, "call_oi": 4000, "put_oi": 2000, "otm_call_vol": 3000}, tech)
         self.assertGreater(o.score, 0.3)
         self.assertEqual(options_signal(None, tech).conf, 0)
+        # open interest missing (0 for every strike): no 'unusual activity' from volume / open interest
+        bad = options_signal({"call_vol": 5000, "put_vol": 500, "call_oi": 0, "put_oi": 3, "otm_call_vol": 3000}, tech)
+        self.assertFalse(any("אופציות" in x for x in bad.reasons))
+        self.assertLess(bad.score, 0.25)
+        self.assertTrue(bad.data["oi_missing"])
+        # ... but the stock's own volume history still can
+        hist = options_signal({"call_vol": 5000, "put_vol": 500, "call_oi": 0, "put_oi": 0, "otm_call_vol": 3000}, tech,
+                              [1000.0] * 20)
+        self.assertTrue(any("פי 5.5 מהממוצע שלה" in x for x in hist.reasons))
 
     def test_news(self):
         self.assertGreater(lexicon_score("Acme raises guidance")[0], 0)

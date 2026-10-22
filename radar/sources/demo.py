@@ -325,12 +325,15 @@ class DemoSources:
     def extra_news(self, ticker, days, name=None, have=0):
         return []
 
-    def telegram_posts(self, channels, days=7, max_pages=12):
+    def telegram_posts(self, channels, days=7, max_pages=12, info=None):
         """Two made-up posts, so the demo shows how a mention looks."""
         from datetime import datetime, timedelta, timezone
         from .telegram import channel_name
         now = datetime.now(timezone.utc)
         chs = [channel_name(c) for c in channels or []] or ["demo"]
+        if info is not None:
+            for c in chs:
+                info[c] = {"ok": True, "newest": (now - timedelta(days=1 if c in (chs[0], chs[-1]) else 20)).isoformat()}
         return [{"id": 2, "date": now - timedelta(days=1), "channel": chs[0],
                  "text": "(דמו) מניית DMO008 קפצה אחרי הדוח הרבעוני\nפרטים בהמשך", "url": "https://t.me/s/demo"},
                 {"id": 1, "date": now - timedelta(days=4), "channel": chs[-1],

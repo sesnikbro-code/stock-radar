@@ -26,12 +26,18 @@ def enabled(settings) -> bool:
     return bool(settings.get("telegram.enabled", True) and settings.get("telegram.channels"))
 
 
-def read(src, settings) -> tuple[list[dict], str]:
-    """The posts of the last week from all channels, and when they were read (UTC)."""
+def read(src, settings) -> tuple[list[dict], str, dict]:
+    """The posts of the last week from all channels, when they were read (UTC), and per channel whether it
+    answered and the date of its newest post."""
     at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    posts = src.telegram_posts(settings.get("telegram.channels"), int(settings.get("telegram.lookback_days") or 7),
-                               int(settings.get("telegram.max_pages") or 12))
-    return posts, at
+    reach: dict = {}
+    try:
+        posts = src.telegram_posts(settings.get("telegram.channels"), int(settings.get("telegram.lookback_days") or 7),
+                                   int(settings.get("telegram.max_pages") or 12), info=reach)
+    except TypeError:   # a source without the per-channel report
+        posts = src.telegram_posts(settings.get("telegram.channels"), int(settings.get("telegram.lookback_days") or 7),
+                                   int(settings.get("telegram.max_pages") or 12))
+    return posts, at, reach
 
 
 def candidate_names(posts: list[dict], results: list[dict], meta: dict | None = None, src=None) -> dict[str, str]:
@@ -55,14 +61,17 @@ def candidate_names(posts: list[dict], results: list[dict], meta: dict | None = 
 
 
 def summary(settings, posts: list[dict], results: list[dict] | None = None, src=None, meta: dict | None = None,
-            read_at: str | None = None, mode: str = "scan") -> tuple[dict, list[dict]]:
+            read_at: str | None = None, mode: str = "scan", reach: dict | None = None) -> tuple[dict, list[dict]]:
     """What the scan data carries about the channels, and every mention found (for the journal)."""
     names = channels(settings)
     per = {c: 0 for c in names}
     for p in posts:
         per[p.get("channel")] = per.get(p.get("channel"), 0) + 1
+    reach = {c: {"ok": bool((reach or {}).get(c, {}).get("ok", per.get(c, 0) > 0)),
+                 "newest": (reach or {}).get(c, {}).get("newest")} for c in names}
     out = {"labels": settings.get("telegram.labels") or {}, "channels": names, "per": per, "posts": len(posts),
-           "read_at": read_at, "mode": mode, "stats": telegram.channel_stats(posts, names), "stocks": []}
+           "read_at": read_at, "mode": mode, "stats": telegram.channel_stats(posts, names), "reach": reach,
+           "stocks": []}
     found: list[dict] = []
     if not posts:
         return out, found
@@ -86,7 +95,7 @@ def feed(journal: Journal, summ: dict) -> dict:
     hist = journal.tg_stocks()
     return {"schema": 1, "updated": summ.get("read_at"), "mode": summ.get("mode"),
             "labels": summ.get("labels"), "channels": summ.get("channels"), "per": summ.get("per"),
-            "posts": summ.get("posts"), "stats": summ.get("stats"), "week": summ.get("stocks"),
+            "posts": summ.get("posts"), "stats": summ.get("stats"), "reach": summ.get("reach"), "week": summ.get("stocks"),
             "reads": journal.tg_reads(30), "history": hist}
 
 
@@ -124,7 +133,7 @@ def pull(settings, out_dir: Path | None, demo: bool = False) -> str:
     if not enabled(settings):
         raise RuntimeError("קריאת הטלגרם כבויה בקובץ config.yaml (telegram.enabled).")
     src = get_sources(settings, demo)
-    posts, at = read(src, settings)
+    posts, at, reach = read(src, settings)
     base = Path(out_dir) / "demo" if out_dir and demo else (Path(out_dir) if out_dir else None)
     latest = None
     if base is not None:
@@ -133,7 +142,7 @@ def pull(settings, out_dir: Path | None, demo: bool = False) -> str:
         except (OSError, ValueError):
             latest = None
     results = (latest or {}).get("results") or []
-    summ, found = summary(settings, posts, results, src, None, at, "manual")
+    summ, found = summary(settings, posts, results, src, None, at, "manual", reach)
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     journal = Journal(settings.data_dir / ("journal_demo.sqlite" if demo else "journal.sqlite"))
     try:
@@ -152,9 +161,12 @@ def pull(settings, out_dir: Path | None, demo: bool = False) -> str:
     parts = ", ".join(f"{labels.get(c, c)} {n}" for c, n in summ["per"].items())
     if not posts:
         raise RuntimeError(f"לא נקראה אף הודעה מערוצי הטלגרם ({parts}). ייתכן שטלגרם חסם זמנית – נסה שוב בעוד שעה.")
-    zero = [labels.get(c, c) for c, n in summ["per"].items() if n == 0]
+    failed = [labels.get(c, c) for c, r in summ["reach"].items() if not r["ok"]]
+    quiet = [labels.get(c, c) for c, r in summ["reach"].items() if r["ok"] and not summ["per"].get(c)]
     msg = (f"המשיכה מהטלגרם הסתיימה: {len(posts)} הודעות ({parts}). "
            f"{len(summ['stocks'])} מניות הוזכרו השבוע, {data['history']['n_stocks']} מאז שהתחלנו.")
-    if zero:
-        msg += f" לא נקראו הודעות מ: {', '.join(zero)}."
+    if failed:
+        msg += f" לא הצלחתי לקרוא את: {', '.join(failed)}."
+    if quiet:
+        msg += f" לא פרסמו השבוע: {', '.join(quiet)}."
     return msg

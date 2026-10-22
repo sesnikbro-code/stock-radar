@@ -66,8 +66,9 @@ DEFAULTS: dict = {
     "options": {"enabled": True, "max_expirations": 2},
     "telegram": {                     # public Telegram channels: shown next to the stock, not part of the score
         "enabled": True,
-        "channels": ["Tisraelnewss", "weralllocos", "Mivzakhon"],
-        "labels": {"Tisraelnewss": "ביזנס 10", "weralllocos": "המשקיע ששוקע", "Mivzakhon": "מבזקהון"},
+        "channels": ["Tisraelnewss", "weralllocos", "Mivzakhon", "TheAmericanDream5", "TradingIL", "hotstocksshells"],
+        "labels": {"Tisraelnewss": "ביזנס 10", "weralllocos": "המשקיע ששוקע", "Mivzakhon": "מבזקהון",
+                   "TheAmericanDream5": "התראות מניות חמות", "TradingIL": "TradingIL", "hotstocksshells": "בורסה 360"},
         "lookback_days": 7,
         "max_pages": 12,
     },

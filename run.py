@@ -56,6 +56,19 @@ def _replay_demo_history(s, days: int, model_path=None) -> None:
             d += timedelta(days=1)
 
 
+def _saved_tickers(args) -> list[str]:
+    """The stocks starred in the app (saved.json next to the app data)."""
+    if not getattr(args, "export", None):
+        return []
+    path = Path(args.export) / ("demo/saved.json" if args.demo else "saved.json")
+    try:
+        import json
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return [str(t).upper() for t in data.get("tickers") or []][:60]
+    except (OSError, ValueError):
+        return []
+
+
 def cmd_scan(s, args) -> str:
     from radar.alerts import send_all
     from radar.pipeline import run_scan
@@ -64,6 +77,11 @@ def cmd_scan(s, args) -> str:
     if args.demo and args.demo_history:
         (s.data_dir / "journal_demo.sqlite").unlink(missing_ok=True)
         _replay_demo_history(s, args.demo_history, _model_path(s, args))
+    saved = _saved_tickers(args)
+    if saved:   # the stocks starred in the app are analysed every day, picked or not
+        u = s.cfg.setdefault("universe", {})
+        u["watchlist"] = list(dict.fromkeys([*(u.get("watchlist") or []), *saved]))
+        log.info("מניות שמורות באפליקציה: %s", " ".join(saved))
     res = run_scan(s, demo=args.demo, model_path=_model_path(s, args))
     if args.export:
         from radar.export import export_scan

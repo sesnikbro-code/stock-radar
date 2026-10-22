@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Runs inside GitHub Actions (called from .github/workflows/radar.yml).
 # Modes: setup (first install or update: starts the first real scan), scan, ticker, backtest, train, test-alert,
-#        telegram (read the Telegram channels now, without a full scan).
+#        telegram (read the Telegram channels now, without a full scan), saved (the stocks starred in the app).
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
@@ -43,6 +43,15 @@ then
   echo skip > .radar_mode
   echo 0 > .radar_rc
   exit 0
+fi
+
+# the stocks starred in the app: just write the list (no packages, no journal), the next scan analyses them
+if [ "$MODE" = saved ]; then
+  # shellcheck disable=SC2086
+  python3 ci/saved.py $SYMBOLS
+  rc=$?
+  echo "$rc" > .radar_rc
+  exit "$rc"
 fi
 
 if [ -z "${RADAR_SKIP_INSTALL:-}" ] && ! { python -m pip install -q --upgrade pip && python -m pip install -q -r requirements.txt; }; then

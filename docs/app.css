@@ -395,3 +395,21 @@ ol.steps li::marker { font-weight: 700; color: var(--accent); }
 .tg-head b { display: block; font-size: 19px; }
 .sdot { width: 9px; height: 9px; border-radius: 50%; flex: none; background: var(--muted); }
 .sdot.good { background: var(--good); } .sdot.bad { background: var(--bad); }
+
+/* ---------- saved stocks (the star) ---------- */
+.save-btn { display: inline-flex; align-items: center; gap: 6px; flex: none; border: 1px solid var(--line); background: var(--surface);
+  color: var(--muted); border-radius: 999px; width: 36px; height: 36px; justify-content: center; cursor: pointer; padding: 0; font: inherit; }
+.save-btn svg { width: 19px; height: 19px; }
+.save-btn.on { color: #d79b00; border-color: #d79b00; background: color-mix(in srgb, #d79b00 12%, var(--surface)); }
+.save-btn.big { width: auto; padding: 0 12px; font-size: 14px; font-weight: 600; }
+.s-head .save-btn { margin-inline-start: auto; align-self: center; }
+.pick-id .save-btn { vertical-align: middle; margin-inline-start: 8px; width: 32px; height: 32px; }
+.sheet-bar .save-btn { margin-inline-start: auto; }
+.saved-card { border-color: color-mix(in srgb, #d79b00 45%, var(--line)); }
+.saved-title { display: flex; align-items: center; gap: 8px; }
+.saved-title h3 { margin: 0; }
+.saved-star { color: #d79b00; display: inline-flex; }
+.saved-star svg { width: 20px; height: 20px; }
+.saved-hint { display: flex; align-items: center; gap: 6px; margin: 0; }
+.saved-row .x-btn { width: 34px; height: 34px; font-size: 15px; color: var(--muted); flex: none; }
+.saved-row .chips { display: flex; flex-wrap: wrap; gap: 6px; }

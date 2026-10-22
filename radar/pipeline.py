@@ -326,6 +326,9 @@ def run_scan(settings, demo: bool = False, tickers: list[str] | None = None, pro
     t_last = panel["Close"].index[-1]
     elig = eligibility(feats, filters).loc[t_last].copy()
     forced = set(watch) | (set(meta) if tickers else set())  # discovery stocks must still pass the filters
+    # saved / watchlist stocks are analysed every day even when they fail the liquidity and price filters, but such a
+    # stock is never picked: the picks stay the stocks that passed the same rules as everything else
+    watch_only = {t for t in watch if t in elig.index and not bool(elig[t])} if not tickers else set()
     for t in forced:
         if t in elig.index and pd.notna(feats["close"][t].loc[t_last]):
             elig[t] = True
@@ -383,10 +386,10 @@ def run_scan(settings, demo: bool = False, tickers: list[str] | None = None, pro
 
     # 4. context + signals -------------------------------------------------------
     ctx = build_context(src, settings, panel, today, tds, journal)
-    tg_posts, tg_at, tg_on = [], None, tgwatch.enabled(settings)
+    tg_posts, tg_at, tg_reach, tg_on = [], None, {}, tgwatch.enabled(settings)
     if tg_on and hasattr(src, "telegram_posts"):
         try:   # public Telegram channels: which of these stocks the Israeli public is reading about
-            tg_posts, tg_at = tgwatch.read(src, settings)
+            tg_posts, tg_at, tg_reach = tgwatch.read(src, settings)
             log.info("נקראו %d הודעות מערוצי הטלגרם", len(tg_posts))
         except Exception as e:  # noqa: BLE001
             log.warning("קריאת ערוצי הטלגרם נכשלה: %s", e)
@@ -517,6 +520,8 @@ def run_scan(settings, demo: bool = False, tickers: list[str] | None = None, pro
     for r in results:
         if r.get("exclude"):          # in a pending takeover or bankrupt: the upside is capped or gone
             r["why_not"] = "deal"
+        elif r["ticker"] in watch_only:
+            r["why_not"] = "filters"
         elif r["risk"] > settings.get("scan.max_risk_score"):
             r["why_not"] = "risk"
         elif model_mode and not r.get("in_band"):
@@ -555,7 +560,7 @@ def run_scan(settings, demo: bool = False, tickers: list[str] | None = None, pro
     # the list: picks first in the order they were chosen, then the rest by the model's ranking (or the score)
     rest = sorted([r for r in results if not r["pick"]], key=order)
     results = picks + rest
-    tg_sum, tg_found = (tgwatch.summary(settings, tg_posts, results, src, meta, tg_at, "scan") if tg_on
+    tg_sum, tg_found = (tgwatch.summary(settings, tg_posts, results, src, meta, tg_at, "scan", tg_reach) if tg_on
                         else (None, []))
 
     # 6. journal, paper trading, learning ---------------------------------------

@@ -66,6 +66,8 @@
 
   // ------------------------------------------------------------------ icons
   const ICON = {
+    star: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M12 3.5l2.6 5.3 5.8.8-4.2 4.1 1 5.8L12 16.8l-5.2 2.7 1-5.8-4.2-4.1 5.8-.8z"/></svg>',
+    starOn: '<svg viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M12 3.5l2.6 5.3 5.8.8-4.2 4.1 1 5.8L12 16.8l-5.2 2.7 1-5.8-4.2-4.1 5.8-.8z"/></svg>',
     today: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><path d="M12 12l6-6"/><circle cx="15.5" cy="9" r="1.2" fill="currentColor" stroke="none"/></svg>',
     market: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.6 2.6 3.8 5.6 3.8 9s-1.2 6.4-3.8 9c-2.6-2.6-3.8-5.6-3.8-9S9.4 5.6 12 3z"/></svg>',
     perf: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 20h18"/><path d="M4 16l5-5 4 3 7-8"/><path d="M15 6h5v5"/></svg>',
@@ -86,7 +88,7 @@
     tab: 'today', data: null, demo: false, status: null, index: null, viewing: null, loading: true,
     backtest: undefined, model: undefined, review: undefined, pmAll: false, pmShow: 'all', tickers: undefined,
     view: store.get('view', 'simple'),   // simple = only the picks, the four things that matter and radar vs. the S&P 500 search: '', searchMsg: null, job: store.get('job'),
-    installEvt: null, sheet: null,
+    installEvt: null, sheet: null, savedInfo: {}, unsaveAsk: null,
   };
 
   async function getJSON(path) {
@@ -111,8 +113,10 @@
     state.review = undefined;
     state.tickers = undefined;
     state.tg = undefined;
+    state.savedInfo = {};
     state.loading = false;
     render();
+    reconcileSaved();
   }
 
   // ------------------------------------------------------------------ small components
@@ -401,11 +405,12 @@
     if (n >= 10 && news === 0) out.push('לא התקבלו חדשות לאף מניה בסריקה הזו, ולכן אותות החדשות לא פעלו. לבדוק חדשות ידנית.');
     if (res.length && !res.some((r) => 'filings_checked' in r)) out.push('הסריקה הזו מלפני העדכון: בדיקת עסקאות הרכישה תרוץ מהסריקה הבאה.');
     else if (h && n >= 10 && h.filings === 0) out.push('דיווחי SEC לא התקבלו בסריקה הזו, ולכן בדיקת עסקאות הרכישה וההנפקות לא רצה.');
-    if (d.telegram && d.telegram.posts === 0) out.push('ערוצי הטלגרם לא נקראו בסריקה הזו, ולכן האזכורים שם לא מוצגים.');
-    else if (d.telegram && d.telegram.per) {
-      const miss = Object.keys(d.telegram.per).filter((c) => d.telegram.per[c] === 0);
-      if (miss.length) out.push(`ערוץ הטלגרם ${miss.map((c) => tgLabel(c)).join(', ')} לא נקרא בסריקה הזו (או שלא פרסם השבוע), ולכן האזכורים שם לא מוצגים.`);
-    }
+    if (d.telegram && d.telegram.per) {
+      const t = d.telegram;
+      const miss = Object.keys(t.per).filter((c) => (t.reach && t.reach[c] ? !t.reach[c].ok : t.per[c] === 0));
+      if (miss.length && miss.length === Object.keys(t.per).length) out.push('ערוצי הטלגרם לא נקראו בסריקה הזו, ולכן האזכורים שם לא מוצגים.');
+      else if (miss.length) out.push(`ערוץ הטלגרם ${miss.map((c) => tgLabel(c)).join(', ')} לא נקרא בסריקה הזו, ולכן האזכורים שם לא מוצגים.`);
+    } else if (d.telegram && d.telegram.posts === 0) out.push('ערוצי הטלגרם לא נקראו בסריקה הזו, ולכן האזכורים שם לא מוצגים.');
     return out;
   }
   function trustCard(d) {
@@ -568,7 +573,7 @@
     const warn = (r.cons || [])[0];
     return `<article class="card pick" role="button" tabindex="0" data-open="${i}" aria-label="${esc(r.ticker)} ${esc(r.name)}">
       <div class="pick-head">
-        <div class="pick-id"><span class="tk">${esc(r.ticker)}</span><div class="nm">${esc(r.name)}</div>
+        <div class="pick-id"><span class="tk">${esc(r.ticker)}</span>${saveBtn(r)}<div class="nm">${esc(r.name)}</div>
           <div class="where">${esc([r.industry, r.country].filter(Boolean).join(' · '))}</div></div>
         <div style="padding-bottom:14px">${ring(r.upside, 'var(--accent)', 'פוטנציאל')}</div>
       </div>
@@ -608,6 +613,7 @@
       ${statusBanners()}
       ${whatsNew()}
       ${tgStrip()}
+      ${savedSection()}
       ${trustCard(d)}
       <div class="strip">
         <button class="pill ${mk}" data-tab="market"><span class="sw"></span>שוק ${esc(m.label || '')}</button>
@@ -684,6 +690,114 @@
         <span class="nm">${esc(tgLabel(x.c))} · ${x.d ? dmy(x.d) : ''} · ${whenText(x.d)}</span></span></a>`).join('')}</div>
       <p class="muted small" style="margin:8px 0 0">הערוצים מסכמים בעברית חדשות שכבר פורסמו. אזכור אומר שהמניה כבר בכותרות בישראל – לא שהיא תעלה. הביקורת העצמית בודקת אם מניות שהוזכרו שם הצליחו יותר או פחות.</p></div>`;
   }
+  // ---------------------------------------------------------------- saved stocks (the star)
+  // Kept on this phone until deleted, whatever the radar shows. The list is also sent to the cloud (mode 'saved'),
+  // so the daily scan analyses these stocks every day, picked or not.
+  const savedGet = () => { const v = store.get('saved'); return v && Array.isArray(v.list) ? v : { list: [], updated: 0, dirty: false }; };
+  const isSaved = (t) => savedGet().list.some((x) => x.t === t);
+  function saveBtn(r, big) {
+    const on = isSaved(r.ticker);
+    return `<button class="save-btn${on ? ' on' : ''}${big ? ' big' : ''}" data-act="save" data-t="${esc(r.ticker)}" aria-pressed="${on}" aria-label="${on ? 'הסר מהשמורות' : 'שמור'} ${esc(r.ticker)}">${on ? ICON.starOn : ICON.star}${big ? `<span>${on ? 'שמורה' : 'שמור'}</span>` : ''}</button>`;
+  }
+  function findStock(t) {
+    const res = (state.data && state.data.results) || [];
+    const r = res.find((x) => x.ticker === t);
+    if (r) return r;
+    if (state.sheet && state.sheet.kind === 'detail' && state.sheet.r.ticker === t) return state.sheet.r;
+    return null;
+  }
+  function toggleSave(t) {
+    const v = savedGet();
+    const i = v.list.findIndex((x) => x.t === t);
+    if (i >= 0) { v.list.splice(i, 1); toast(`${t} הוסרה מהשמורות`); }
+    else {
+      const r = findStock(t) || { ticker: t };
+      v.list.unshift({ t, name: r.name || '', at: new Date().toISOString().slice(0, 10), price: isNum(r.price) ? r.price : null });
+      toast(`${t} נשמרה – תופיע למעלה במסך "היום" עד שתמחק אותה`);
+    }
+    v.updated = Date.now(); v.dirty = true;
+    store.set('saved', v);
+    state.unsaveAsk = null;
+    scheduleSync();
+    if (state.sheet) renderSheet(true);
+    render();
+  }
+  let syncT = null;
+  function scheduleSync() { clearTimeout(syncT); syncT = setTimeout(syncSaved, 12000); }
+  async function syncSaved() {
+    const v = savedGet();
+    if (!v.dirty || !cloudReady() || PREVIEW || state.demo) return;
+    if (state.job) { syncT = setTimeout(syncSaved, 60000); return; }   // never in the middle of the user's own run
+    const repo = ghRepo();
+    try {
+      await gh(`/repos/${repo.owner}/${repo.repo}/actions/workflows/radar.yml/dispatches`, {
+        method: 'POST', body: JSON.stringify({ ref: store.get('branch', 'main'), inputs: { mode: 'saved', symbols: v.list.map((x) => x.t).join(' ') } }),
+      });
+      v.syncAt = Date.now(); store.set('saved', v);
+    } catch (e) { /* tried again on the next load */ }
+  }
+  // the cloud copy: adopt it when this phone has no unsent change (a change made on another device), confirm a sync
+  async function reconcileSaved() {
+    if (PREVIEW || state.demo) return;
+    const cloud = await getJSON('saved.json');
+    const v = savedGet();
+    const mine = v.list.map((x) => x.t);
+    const theirs = cloud && Array.isArray(cloud.tickers) ? cloud.tickers : null;
+    const same = theirs && theirs.length === mine.length && theirs.every((t) => mine.includes(t));
+    if (theirs && same) { if (v.dirty) { v.dirty = false; store.set('saved', v); } }
+    else if (theirs && !v.dirty) {
+      v.list = theirs.map((t) => v.list.find((x) => x.t === t) || { t, name: '', at: String(cloud.updated || '').slice(0, 10), price: null });
+      store.set('saved', v);
+    } else if (!theirs && mine.length) { v.dirty = true; store.set('saved', v); }
+    if (v.dirty && (!v.syncAt || Date.now() - v.syncAt > 15 * 60e3)) syncSaved();
+    render();
+  }
+  async function loadSavedInfo(t) {
+    state.savedInfo[t] = null;   // loading
+    const f = await getJSON(`tickers/${encodeURIComponent(t)}.json`);
+    state.savedInfo[t] = f && f.result ? { date: f.date, r: f.result } : false;
+    if (!state.sheet) render();
+  }
+  function savedSection() {
+    const v = savedGet();
+    if (!state.data) return '';
+    if (!v.list.length) {
+      return `<p class="muted small saved-hint">${ICON.star.replace('<svg', '<svg width="15" height="15"')} לחיצה על הכוכב ליד מניה שומרת אותה כאן, עד שתמחק אותה.</p>`;
+    }
+    const res = state.data.results || [];
+    const rows = v.list.map((s) => {
+      if (state.unsaveAsk === s.t) {
+        return `<div class="row" style="cursor:default"><span class="grow"><b>למחוק את ${esc(s.t)} מהשמורות?</b></span>
+          <button class="btn small" data-act="unsave" data-t="${esc(s.t)}">מחק</button><button class="btn small ghost" data-act="unsave-no">ביטול</button></div>`;
+      }
+      const i = res.findIndex((r) => r.ticker === s.t);
+      const r = i >= 0 ? res[i] : null;
+      let info = null;
+      if (!r) {
+        if (state.savedInfo[s.t] === undefined) loadSavedInfo(s.t);
+        info = state.savedInfo[s.t] || null;
+      }
+      const rr = r || (info && info.r);
+      const since = rr && isNum(rr.price) && isNum(s.price) && s.price > 0 ? rr.price / s.price - 1 : null;
+      const status = r ? (r.pick ? '<span class="chip good">בחירה של היום</span>' : `<span class="chip">נסרקה היום${WHY_NOT[r.why_not] ? ` · ${esc(WHY_NOT[r.why_not])}` : ''}</span>`)
+        : info ? `<span class="chip">נותחה ב־${dm(info.date)}</span>` : '<span class="chip warn">לא נסרקה היום</span>';
+      const line = rr
+        ? `פוטנציאל <b class="num">${Math.round(rr.upside)}</b> · סיכון <b class="num">${Math.round(rr.risk)}</b> · ${price(rr.price)}${since !== null ? ` · <span class="${since >= 0 ? 'up' : 'down'}">${pct(since, 1, true)}</span> מאז ששמרת` : ''}`
+        : `נשמרה ב־${dm(s.at)}${isNum(s.price) ? ` במחיר ${price(s.price)}` : ''}. הסריקה הבאה תנתח אותה.`;
+      const open = r ? `data-open="${i}"` : info ? `data-act="find" data-sym="${esc(s.t)}"` : '';
+      const name = (rr && rr.name) || s.name;
+      return `<div class="row saved-row" ${open} ${open ? 'role="button" tabindex="0"' : 'style="cursor:default"'}>
+        <span class="grow"><span class="tk">${esc(s.t)}</span>${name ? ` <span class="nm"><bdi>${esc(name)}</bdi></span>` : ''}
+          <span class="nm wrap">${line}</span>
+          <span class="chips" style="margin-top:4px">${status}${!rr && cloudReady() ? `<button class="chip" style="border:0;cursor:pointer" data-run="ticker" data-sym="${esc(s.t)}">נתח עכשיו</button>` : ''}</span></span>
+        <button class="icon-btn small x-btn" data-act="unsave-ask" data-t="${esc(s.t)}" aria-label="מחק את ${esc(s.t)} מהשמורות">✕</button></div>`;
+    }).join('');
+    const sync = !cloudReady() ? 'שמורות בטלפון הזה. כדי שהסריקה היומית תנתח אותן כל בוקר – חיבור לענן בהגדרות.'
+      : v.dirty ? 'השינוי נשלח לענן. מהסריקה הבאה הסריקה היומית תנתח אותן.' : 'הסריקה היומית מנתחת אותן כל בוקר, גם כשהן לא נבחרות.';
+    return `<div class="card saved-card"><div class="saved-title"><span class="saved-star">${ICON.starOn}</span><h3>השמורות שלי (${N(v.list.length)})</h3></div>
+      <p class="muted small" style="margin:2px 0 6px">${sync}</p>
+      <div class="rows">${rows}</div></div>`;
+  }
   // ---------------------------------------------------------------- Telegram: connection strip, screen, manual pull
   async function loadTg() {
     state.tg = null;   // loading
@@ -699,8 +813,8 @@
     if (!f && !s) return null;
     const fAt = f && f.updated, sAt = s && (s.read_at || d.generated);
     const cur = f && (!sAt || (fAt && fAt >= sAt))
-      ? { at: fAt, mode: f.mode, per: f.per, posts: f.posts, stats: f.stats, week: f.week, channels: f.channels }
-      : { at: sAt, mode: s.mode || 'scan', per: s.per, posts: s.posts, stats: s.stats, week: s.stocks, channels: s.channels };
+      ? { at: fAt, mode: f.mode, per: f.per, posts: f.posts, stats: f.stats, week: f.week, channels: f.channels, reach: f.reach }
+      : { at: sAt, mode: s.mode || 'scan', per: s.per, posts: s.posts, stats: s.stats, week: s.stocks, channels: s.channels, reach: s.reach };
     cur.channels = cur.channels || Object.keys(cur.per || (s && s.labels) || {});
     cur.reads = f ? f.reads : null;
     cur.history = f ? f.history : null;
@@ -708,12 +822,14 @@
   }
   function tgState(i) {
     if (!i) return ['', 'עוד לא נקרא', 'הקריאה הראשונה תהיה בסריקה הבאה'];
-    const zero = i.channels.filter((c) => i.per && !i.per[c]);
-    if (!i.posts) return ['bad', 'לא מחובר', 'בקריאה האחרונה לא התקבלה אף הודעה'];
-    if (i.per && zero.length) return ['warn', 'מחובר חלקית', `לא נקראו הודעות מ: ${zero.map((c) => tgLabel(c)).join(', ')}`];
+    const failed = i.channels.filter((c) => tgFailed(i, c));
+    if (!i.posts && failed.length) return ['bad', 'לא מחובר', 'בקריאה האחרונה לא התקבלה אף הודעה'];
+    if (failed.length) return ['warn', 'מחובר חלקית', `לא הצלחתי לקרוא את: ${failed.map((c) => tgLabel(c)).join(', ')}`];
     if (i.at && daysSince(i.at) > 3.5) return ['warn', 'לא עודכן', `הקריאה האחרונה ${ago(i.at)}`];
     return ['good', 'מחובר', ''];
   }
+  // a channel failed when it did not answer; one that answered but posted nothing this week is fine
+  const tgFailed = (i, c) => (i.reach && i.reach[c] ? !i.reach[c].ok : !!(i.per && !i.per[c]));
   const tgRunning = () => !!(state.job && state.job.mode === 'telegram');
   function tgStrip() {
     if (state.tg === undefined) loadTg();
@@ -778,10 +894,14 @@
     const chanRows = i ? i.channels.map((c) => {
       const s = st[c] || {};
       const n = s.n != null ? s.n : ((i.per || {})[c] || 0);
+      const failed = tgFailed(i, c);
+      const newest = i.reach && i.reach[c] && i.reach[c].newest;
       return `<a class="row" href="https://t.me/s/${encodeURIComponent(c)}" target="_blank" rel="noopener">
-        <span class="sdot ${n ? 'good' : 'bad'}"></span><span class="grow">
+        <span class="sdot ${n ? 'good' : failed ? 'bad' : ''}"></span><span class="grow">
         <span class="tk" style="font-family:inherit">${esc(tgLabel(c))}</span>
-        <span class="nm wrap">${n ? `${N(n)} הודעות נקראו${s.from ? ` · מ־${dm(s.from)} עד ${dm(s.to)}` : ''}` : 'לא נקראו הודעות בקריאה האחרונה'}</span>
+        <span class="nm wrap">${n ? `${N(n)} הודעות נקראו${s.from ? ` · מ־${dm(s.from)} עד ${dm(s.to)}` : ''}`
+          : failed ? 'לא הצלחתי לקרוא את הערוץ בקריאה האחרונה'
+            : `הערוץ נקרא, אבל לא פרסם השבוע${newest ? ` (ההודעה האחרונה מ־${dmy(newest)})` : ''}`}</span>
         ${s.last_t ? `<span class="nm wrap">האחרונה שנקראה (${hm(s.to)}): <span style="color:var(--ink)">${esc(s.last_t)}</span></span>` : ''}</span></a>`;
     }).join('') : '';
     const week = (i && i.week) || [];
@@ -820,7 +940,7 @@
     const pl = r.plan || {};
     const pros = (r.pros || []).slice(0, 3);
     return `<article class="card scard" role="button" tabindex="0" data-open="${i}" aria-label="${esc(r.ticker)} ${esc(r.name)}">
-      <div class="s-head"><span class="tk">${esc(r.ticker)}</span><span class="nm">${esc(r.name)}</span></div>
+      <div class="s-head"><span class="tk">${esc(r.ticker)}</span><span class="nm">${esc(r.name)}</span>${saveBtn(r)}</div>
       <div class="s-nums">
         <div class="s-num"><span class="eyebrow">פוטנציאל</span><b class="num">${Math.round(r.upside)}</b><span class="muted small">מתוך 100</span></div>
         <div class="s-num ${rc}"><span class="eyebrow">סיכון</span><b>${rl}</b><span class="muted small">${Math.round(r.risk)} מתוך 100</span></div>
@@ -834,7 +954,7 @@
     const res = d.results || [];
     const picks = res.map((r, i) => [r, i]).filter(([r]) => r.pick);
     return `<div class="stack">
-      ${statusBanners()}${whatsNew()}${tgStrip()}${scoreboard(d)}
+      ${statusBanners()}${whatsNew()}${tgStrip()}${savedSection()}${scoreboard(d)}
       <div class="section-title"><h2>המניות של היום</h2><span class="muted small">${dmy(d.date)}</span></div>
       <p class="muted small" style="margin:-6px 0 0">הרדאר מראה אצל אילו מניות יש היום הכי הרבה סימנים לעלייה – לא האם הן יעלו. כל מניה כאן כבר עברה את הסינון. מסתכלים על ארבעה דברים: פוטנציאל, סיכון, הסיבות והסטופ. בלי סטופ אין תוכנית.</p>
       ${picks.length ? picks.map(([r, i]) => simpleCard(r, i, d.date)).join('') : '<div class="card empty">אף מניה לא עברה היום את הסינון. זה תקין – לפעמים הדבר הנכון הוא לחכות.</div>'}
@@ -852,7 +972,7 @@
       ['יציאה לכל המאוחר', `אחרי ${pl.days || 63} ימי מסחר`]].filter(Boolean);
     return `<div class="sheet-bar"><div class="topbar-in">
         <button class="icon-btn" data-act="close" aria-label="חזרה">${ICON.back}</button>
-        <div class="brand"><h1 class="tk" style="font:600 19px/1 var(--font-data)">${esc(r.ticker)}</h1></div></div></div>
+        <div class="brand"><h1 class="tk" style="font:600 19px/1 var(--font-data)">${esc(r.ticker)}</h1></div>${saveBtn(r, true)}</div></div>
       <div class="sheet-in">
         ${ctx.demo ? banner('info', 'מניה בדויה (דמו)', 'כל הנתונים כאן לדוגמה בלבד.') : ''}
         ${r.deal ? banner(r.exclude ? 'bad' : 'warn', r.exclude ? `${r.deal.short}: לא נבחרת` : r.deal.short, dealBody(r.deal)) : ''}
@@ -1118,6 +1238,7 @@
     upside: 'ציון הפוטנציאל נמוך מהסף', risk: 'ציון הסיכון גבוה מהסף', edge: 'ברמת הסיכוי שלה עסקאות הפסידו בבדיקה',
     deal: 'בתהליך רכישה או פשיטת רגל', rank: 'לא נכנסה לרשימת המובילות',
     band: 'לא בין המובילות של המודל היום', sector: 'כבר נבחרו 3 מניות מאותו ענף',
+    filters: 'לא עוברת את מסנני הנזילות והמחיר (נבדקת כי שמרת אותה)',
   };
   const LESSON_ST = {
     adopted: ['good', 'אומץ'], adopted_live: ['good', 'אומץ לפי התוצאות בפועל'], pending: ['warn', 'ממתין לבדיקה בהיסטוריה'],
@@ -1351,6 +1472,7 @@
     return `<div class="sheet-bar"><div class="topbar-in">
         <button class="icon-btn" data-act="close" aria-label="חזרה">${ICON.back}</button>
         <div class="brand"><h1 class="tk" style="font:600 19px/1 var(--font-data)">${esc(r.ticker)}</h1></div>
+        ${saveBtn(r, true)}
         ${cloudReady() && !ctx.demo ? `<button class="btn small ghost" data-run="ticker" data-sym="${esc(r.ticker)}">${ICON.refresh.replace('<svg', '<svg width="16" height="16"')} נתח מחדש</button>` : ''}
       </div></div>
       <div class="sheet-in">
@@ -1586,18 +1708,20 @@
       if (run) {
         job.run = run.id; job.url = run.html_url; job.state = run.status;
         store.set('job', job);
-        if (run.status === 'completed') { finishJob(run.conclusion === 'success'); return; }
+        if (run.status === 'completed') { finishJob(run.conclusion === 'success', null, run.conclusion); return; }
       }
     } catch (e) { /* try again later */ }
     if (state.tab === 'today' && !state.sheet) render();
     else if (state.sheet && state.sheet.kind === 'telegram') renderSheet(true);
     pollT = setTimeout(pollJob, 15000);
   }
-  async function finishJob(ok, reason) {
+  async function finishJob(ok, reason, conclusion) {
     const job = state.job;
     state.job = null;
     store.del('job');
+    if (savedGet().dirty) scheduleSync();
     await loadAll();
+    if (!ok && conclusion === 'cancelled') { toast('ההרצה בוטלה ב־GitHub (ריצה אחרת תפסה את מקומה בתור). אפשר להפעיל שוב.'); return; }
     if (!ok) { toast(reason || (state.status && state.status.message) || 'ההרצה בענן נכשלה'); return; }
     if (job.mode === 'ticker') {
       const sym = (job.symbols || '').split(/\s+/)[0];
@@ -1609,7 +1733,11 @@
       toast('המודל אומן. סריקה חדשה עם הסיכויים מתחילה לבד ותסתיים בעוד כשעה.');
       state.tab = 'perf'; render();
     } else if (job.mode === 'telegram') {
-      toast('המשיכה מהטלגרם הסתיימה');
+      await loadTg();
+      const t = state.tg;
+      const ran = t && t.mode === 'manual' && new Date(t.updated).getTime() >= job.since - 120e3;
+      toast(ran ? `המשיכה מהטלגרם הסתיימה: ${t.posts} הודעות`
+        : 'המשיכה לא רצה: ריצה אחרת בענן תפסה את מקומה בתור. הנתונים עודכנו מהריצה האחרונה – אפשר ללחוץ שוב.');
       openTelegram();
     } else toast(job.mode === 'test-alert' ? 'הודעת הבדיקה נשלחה' : 'ההרצה הסתיימה והנתונים עודכנו');
   }
@@ -1738,6 +1866,10 @@
     else if (act === 'detail-full') { state.sheet.full = true; renderSheet(); }
     else if (act === 'open-learn') { setView('full'); state.tab = 'learn'; render(); }
     else if (act === 'open-tgs') openTelegram();
+    else if (act === 'save') toggleSave(t.dataset.t);
+    else if (act === 'unsave-ask') { state.unsaveAsk = t.dataset.t; render(); }
+    else if (act === 'unsave') toggleSave(t.dataset.t);
+    else if (act === 'unsave-no') { state.unsaveAsk = null; render(); }
     else if (act === 'tg-howto') { state.sheet.howto = true; renderSheet(true); }
     else if (act === 'tg-all') { state.sheet.allTg = true; renderSheet(true); }
     else if (act === 'pm-show') { state.pmShow = t.dataset.k || 'all'; state.pmAll = false; render(); }

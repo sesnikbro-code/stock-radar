@@ -52,8 +52,12 @@ def options_signal(opt: dict | None, tech: dict, history: list[float] | None = N
     if tot < 200:
         res.conf = 0.2
         return res
-    vol_oi = tot / (coi + poi + 1)
-    unusual = clip((vol_oi - 0.25) / 0.75, 0, 1)
+    # Yahoo sometimes sends open interest 0 (or close to it) for every strike, mostly before the US open. Volume
+    # divided by that is meaningless (it showed 'pi 25,000' for Coca-Cola), so open interest is used only when it is
+    # at least a fifth of the day's volume. Otherwise only the stock's own volume history can say 'unusual'.
+    oi = coi + poi
+    vol_oi = tot / oi if oi > 0 and oi >= 0.2 * tot else None
+    unusual = clip((vol_oi - 0.25) / 0.75, 0, 1) if vol_oi is not None else 0.0
     hist_ratio = None
     if history and len(history) >= 10:
         med = statistics.median(history)
@@ -66,11 +70,12 @@ def options_signal(opt: dict | None, tech: dict, history: list[float] | None = N
         direction = -clip((pv / (cv + 1) - 1.0) / 2.0, 0, 1)
     otm_share = (opt.get("otm_call_vol", 0) or 0) / (cv + 1)
     res.score = clip(unusual * direction + 0.2 * direction * otm_share)
-    res.conf = 0.7
-    res.data.update(vol_oi=vol_oi, hist_ratio=hist_ratio)
+    res.conf = 0.7 if (vol_oi is not None or hist_ratio is not None) else 0.35
+    res.data.update(vol_oi=vol_oi, hist_ratio=hist_ratio, oi_missing=vol_oi is None)
     if unusual > 0.3 and abs(direction) > 0.2:
         side = "עלייה (קולים)" if direction > 0 else "ירידה (פוטים)"
-        mult = f"פי {hist_ratio:.1f} מהממוצע שלה" if hist_ratio else f"{vol_oi:.1f} מהפוזיציות הפתוחות"
+        mult = (f"פי {hist_ratio:.1f} מהממוצע שלה" if hist_ratio and (vol_oi is None or hist_ratio >= 1.5)
+                else f"פי {vol_oi:.1f} מהפוזיציות הפתוחות")
         res.reasons.append(f"פעילות אופציות חריגה ({mult}), רובה הימור על {side}")
     iv = num(opt.get("atm_iv"))
     if iv and iv > 1.0:

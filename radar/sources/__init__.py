@@ -140,17 +140,23 @@ class LiveSources:
             out = self.feeds.news(ticker, name, days)
         return out
 
-    def telegram_posts(self, channels: list[str], days: int = 7, max_pages: int = 12) -> list[dict]:
-        """Recent posts of public Telegram channels (read from t.me/s/<name>, no account needed)."""
+    def telegram_posts(self, channels: list[str], days: int = 7, max_pages: int = 12,
+                       info: dict | None = None) -> list[dict]:
+        """Recent posts of public Telegram channels (read from t.me/s/<name>, no account needed).
+        `info` gets, per channel, whether it answered and the date of its newest post."""
         out = []
         for ch in channels or []:
             name = telegram.channel_name(ch)
+            ci: dict = {}
             try:
-                got = telegram.fetch_channel(self.http, name, days, max_pages)
+                got = telegram.fetch_channel(self.http, name, days, max_pages, ci)
                 log.info("ערוץ הטלגרם %s: %d הודעות", name, len(got))
                 out += got
             except Exception as e:  # noqa: BLE001
+                ci.update(ok=False, error=str(e)[:200])
                 log.warning("קריאת ערוץ הטלגרם %s נכשלה: %s", ch, e)
+            if info is not None:
+                info[name] = ci
         return telegram.newest_first(out)
 
     def classify_news(self, ticker: str, name: str, news: list[dict]):

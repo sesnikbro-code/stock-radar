@@ -91,8 +91,10 @@ class TestTelegram(unittest.TestCase):
             self.assertEqual(t["labels"]["Tisraelnewss"], "ביזנס 10")
             self.assertEqual(t["labels"]["weralllocos"], "המשקיע ששוקע")
             self.assertEqual(t["labels"]["Mivzakhon"], "מבזקהון")
-            self.assertEqual(t["channels"], ["Tisraelnewss", "weralllocos", "Mivzakhon"])
-            self.assertEqual(t["per"], {"Tisraelnewss": 1, "weralllocos": 0, "Mivzakhon": 1})
+            self.assertEqual(t["channels"], ["Tisraelnewss", "weralllocos", "Mivzakhon", "TheAmericanDream5", "TradingIL", "hotstocksshells"])
+            self.assertEqual(t["labels"]["hotstocksshells"], "בורסה 360")
+            self.assertEqual(t["per"], {"Tisraelnewss": 1, "weralllocos": 0, "Mivzakhon": 0, "TheAmericanDream5": 0, "TradingIL": 0, "hotstocksshells": 1})
+            self.assertTrue(all(r["ok"] for r in t["reach"].values()))   # quiet, not broken
             self.assertEqual(t["posts"], 2)
             self.assertEqual(t["stats"]["Tisraelnewss"]["n"], 1)
             if "DMO008" in got:
@@ -162,11 +164,12 @@ class TestTelegram(unittest.TestCase):
             f = json.loads((out / "demo" / "telegram.json").read_text(encoding="utf-8"))
             self.assertEqual(f["mode"], "scan")
             self.assertEqual(f["history"]["reads"], 1)
-            self.assertEqual(f["per"], {"Tisraelnewss": 1, "weralllocos": 0, "Mivzakhon": 1})
+            self.assertEqual(f["per"], {"Tisraelnewss": 1, "weralllocos": 0, "Mivzakhon": 0, "TheAmericanDream5": 0, "TradingIL": 0, "hotstocksshells": 1})
             n1 = f["history"]["n_mentions"]
             msg = pull(s, out, demo=True)                      # the manual pull
             self.assertIn("המשיכה מהטלגרם הסתיימה", msg)
-            self.assertIn("המשקיע ששוקע", msg)                 # the channel that gave nothing is named
+            self.assertIn("לא פרסמו השבוע: המשקיע ששוקע", msg)   # quiet channels are named, not called broken
+            self.assertNotIn("לא הצלחתי", msg)
             f2 = json.loads((out / "demo" / "telegram.json").read_text(encoding="utf-8"))
             self.assertEqual(f2["mode"], "manual")
             self.assertEqual(f2["history"]["reads"], 2)
@@ -175,6 +178,29 @@ class TestTelegram(unittest.TestCase):
             latest = json.loads((out / "demo" / "latest.json").read_text(encoding="utf-8"))
             self.assertEqual(latest["telegram"]["mode"], "manual")
             self.assertTrue(all(r["tg_n"] is not None for r in latest["results"]))
+
+    def test_ticker_forms_and_channel_report(self):
+        now = datetime.now(timezone.utc)
+        posts = [{"id": 1, "date": now, "channel": "A", "url": "u/1", "text": "Molson Coors Beverage (סימול TAP) מזנקת"},
+                 {"id": 2, "date": now, "channel": "A", "url": "u/2", "text": "נורת'רופ גרומן ו-ג'נרל דיינמיקס בשיא"}]
+        self.assertEqual(len(telegram.mentions(posts, "TAP", "MOLSON COORS BEVERAGE CO")), 1)
+        self.assertIn("TAP", telegram.explicit_tickers(posts))
+        self.assertEqual(len(telegram.mentions(posts, "NOC", "NORTHROP GRUMMAN CORP")), 1)
+        self.assertEqual(len(telegram.mentions(posts, "GD", "GENERAL DYNAMICS CORP")), 1)
+        # a channel that answered with old posts only: read fine, nothing this week, newest date reported
+        class OldHttp:
+            def get(self, url, params=None, **kw):
+                return _post(500, "ישן", 30) if not params else ""
+        info = {}
+        self.assertEqual(telegram.fetch_channel(OldHttp(), "Tisraelnewss", days=7, info=info), [])
+        self.assertTrue(info["ok"])
+        self.assertTrue(info["newest"] < (now - timedelta(days=29)).isoformat())
+        class DeadHttp:
+            def get(self, url, params=None, **kw):
+                return None
+        info = {}
+        telegram.fetch_channel(DeadHttp(), "x", info=info)
+        self.assertFalse(info["ok"])
 
     def test_journal_log(self):
         import tempfile
