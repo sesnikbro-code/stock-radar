@@ -257,7 +257,11 @@ class Journal:
         """Replays every open position from its entry with its plan: stop, target (entry + target_r x the initial
         risk) or none, trailing stop or fixed, and a maximum holding time in trading days."""
         o, h, lo, c = panel["Open"], panel["High"], panel["Low"], panel["Close"]
-        for p in self.open_positions():
+        # an exit far below its stop may have come from one wrong price: replayed again on the cleaned prices, and
+        # reopened if the market never really reached the stop
+        suspect = [dict(r, status="open", _was_closed=True) for r in self._rows("WHERE status='closed' AND "
+                   "exit_reason IN ('stop','gap') AND exit_price < 0.85 * stop")]
+        for p in self.open_positions() + suspect:
             t = p["ticker"]
             if t not in c.columns:
                 continue
@@ -313,11 +317,16 @@ class Journal:
             held_days = (today - date.fromisoformat(p["entry_date"])).days
             if reason is None and not window and held_days >= cfg.get("max_hold_days", 90) and len(bars):
                 exit_price, exit_date, reason = last, bars.index[-1], "time"
+            if reason == "stop" and exit_price < 0.85 * stop:   # opened far below the stop: a gap, not the stop
+                reason = "gap"
             if reason:
                 self.conn.execute("UPDATE paper SET status='closed', exit_date=?, exit_price=?, exit_reason=?, stop=?, "
                                   "last_price=? WHERE id=?",
                                   (pd.Timestamp(exit_date).date().isoformat(), float(exit_price), reason, stop,
                                    float(exit_price), p["id"]))
+            elif p.get("_was_closed"):
+                self.conn.execute("UPDATE paper SET status='open', exit_date=NULL, exit_price=NULL, exit_reason=NULL, "
+                                  "stop=?, last_price=? WHERE id=?", (stop, last, p["id"]))
             else:
                 self.conn.execute("UPDATE paper SET stop=?, last_price=? WHERE id=?", (stop, last, p["id"]))
         self.conn.commit()

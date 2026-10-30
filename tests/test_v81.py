@@ -195,6 +195,7 @@ class TestModelPicks(unittest.TestCase):
             self.assertTrue(hist["band"])
             res = run_scan(s, demo=True, model_path=path)
             self.assertEqual(res["pick_mode"], "model")
+            self.assertTrue(all(r.get("vol_penalty", 0) == 0 for r in res["results"]))   # the model is not vetoed twice
             self.assertTrue(res["picks"])
             for r in res["picks"]:
                 self.assertTrue(r["in_band"])

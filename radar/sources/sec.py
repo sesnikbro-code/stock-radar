@@ -23,6 +23,19 @@ CEO_CFO = re.compile(r"\b(ceo|cfo|chief executive|chief financial|president|chai
 
 
 # ---------------------------------------------------------------- universe
+# Funds, ETFs and commodity / crypto trusts are listed next to companies (the radar picked USO, an oil fund, and ZCSH,
+# a Zcash fund). They are not companies: no earnings, analysts or insiders, so they are left out.
+FUND_NAME = re.compile(
+    r"\b(ETFs?|ETNs?|ETPs?|Funds?|iShares|SPDR|ProShares|Direxion|Grayscale|VanEck|WisdomTree|GraniteShares|Teucrium"
+    r"|Invesco DB|Sprott Physical|abrdn (Gold|Silver|Platinum|Palladium|Precious))\b"
+    r"|\bTrust\b.*\b(Gold|Silver|Platinum|Palladium|Oil|Bitcoin|Ether(eum)?|Solana|Zcash|XRP|Litecoin|Crypto|Commodit\w*)\b"
+    r"|\b(Gold|Silver|Platinum|Palladium|Bitcoin|Ether(eum)?|Solana|Zcash|XRP|Litecoin|Crypto)\b.*\bTrust\b", re.I)
+
+
+def is_fund_name(name: str | None) -> bool:
+    return bool(name and FUND_NAME.search(str(name)))
+
+
 def is_common_stock_ticker(t: str) -> bool:
     """Drop preferreds, warrants, units, rights. Keep class shares like BRK-B."""
     if not t or not re.fullmatch(r"[A-Z][A-Z0-9.\-]{0,6}", t):
@@ -50,7 +63,7 @@ def parse_tickers_exchange(data: dict, exchanges: list[str]) -> list[dict]:
             continue
         if allowed is not None and (not exch or str(exch).lower() not in allowed):
             continue
-        if ticker in seen or not is_common_stock_ticker(ticker):
+        if ticker in seen or not is_common_stock_ticker(ticker) or is_fund_name(name):
             continue
         seen.add(ticker)
         out.append({"ticker": ticker, "cik": cik, "name": name, "exchange": exch})

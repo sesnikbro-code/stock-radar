@@ -1100,7 +1100,7 @@
     const concl = rv ? (rv.conclusions || []).slice(0, 5) : [];
     const p = d.paper || {};
     const closed = (p.closed_positions || []).slice(0, 6);
-    const why = { stop: 'בסטופ', target: 'ביעד', time: 'בסוף הזמן' };
+    const why = { stop: 'בסטופ', gap: 'בפער מתחת לסטופ', target: 'ביעד', time: 'בסוף הזמן' };
     return `<div class="stack">
       ${scoreboard(d)}
       <div class="card"><h3>מה המערכת למדה</h3>
@@ -1166,7 +1166,7 @@
           <span class="nm">${x.status === 'pending' ? 'תיפתח במחיר הפתיחה של יום המסחר הבא' : `כניסה ${price(x.entry)} · עכשיו ${price(x.last)} · סטופ ${price(x.stop)}${isNum(x.target) ? ` · יעד ${price(x.target)}` : ''}`}</span></span>
           ${x.status === 'pending' ? '<span class="chip">ממתינה</span>' : `<span class="chip ${x.ret >= 0 ? 'good' : 'bad'}"><b>${pct(x.ret, 1, true)}</b></span>`}</div>`).join('');
       const closedRows = (p.closed_positions || []).slice(0, 8).map((x) => `<div class="row" style="cursor:default"><span class="grow"><span class="tk">${esc(x.ticker)}</span>
-          <span class="nm">${dm(x.since)} עד ${dm(x.until)} · ${x.reason === 'stop' ? 'נסגרה בסטופ' : x.reason === 'target' ? 'הגיעה ליעד' : 'נסגרה בסוף תקופת ההחזקה'}</span></span>
+          <span class="nm">${dm(x.since)} עד ${dm(x.until)} · ${x.reason === 'stop' ? 'נסגרה בסטופ' : x.reason === 'gap' ? 'נפתחה בפער מתחת לסטופ' : x.reason === 'target' ? 'הגיעה ליעד' : 'נסגרה בסוף תקופת ההחזקה'}</span></span>
           <span class="chip ${x.ret >= 0 ? 'good' : 'bad'}"><b>${pct(x.ret, 1, true)}</b></span></div>`).join('');
       paper = `<div class="card"><h3>תיק מסחר על נייר</h3><p class="muted small" style="margin:2px 0 10px">מאז ${dmy(p.since)} · ${p.open} פתוחות · ${p.closed} נסגרו${p.pending ? ` · ${p.pending} ממתינות` : ''}</p>
         <div class="duo"><div><div class="eyebrow">התיק</div><span class="big ${tot >= 0 ? 'up' : 'down'}">${pct(tot, 1, true)}</span></div>
@@ -1329,7 +1329,7 @@
     upside: 'ציון הפוטנציאל נמוך מהסף', risk: 'ציון הסיכון גבוה מהסף', edge: 'ברמת הסיכוי שלה עסקאות הפסידו בבדיקה',
     deal: 'בתהליך רכישה או פשיטת רגל', rank: 'לא נכנסה לרשימת המובילות',
     band: 'לא בין המובילות של המודל היום', sector: 'כבר נבחרו 3 מניות מאותו ענף',
-    filters: 'לא עוברת את מסנני הנזילות והמחיר (נבדקת כי שמרת אותה)',
+    filters: 'לא עוברת את מסנני הנזילות והמחיר (נבדקת כי שמרת אותה)', fund: 'קרן או תעודת סל, לא חברה',
   };
   const LESSON_ST = {
     adopted: ['good', 'אומץ'], adopted_live: ['good', 'אומץ לפי התוצאות בפועל'], pending: ['warn', 'ממתין לבדיקה בהיסטוריה'],

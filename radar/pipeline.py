@@ -12,6 +12,7 @@ import pandas as pd
 
 from . import review as selfreview
 from . import tgwatch
+from .dataguard import clean_price_glitches
 from .features import (EARN, INDUSTRY, INSIDER, INSIDER_HISTORY_DAYS, IndustryPeers, live_features, market_at,
                        tech_frame)
 from .journal import Journal
@@ -31,7 +32,7 @@ from .signals.technical import compute_panel_features, eligibility, scores_at, t
 from .sources import get_sources
 from .sources.countries import SHELL_DOMICILES, iso3_for
 from .sources import telegram
-from .sources.sec import flatten_filings
+from .sources.sec import flatten_filings, is_fund_name
 from .train import base_plan
 from .util import MarketContext, SignalResult, TickerData, num
 
@@ -166,6 +167,23 @@ def corporate_events(td: TickerData, sigs: dict[str, SignalResult], today: date,
     ev.data["checked"] = td.filings is not None
     sigs["filings"] = ev
     return deal
+
+
+def vol_penalty(atr_pct: float | None, settings) -> float:
+    """Points off the upside score for a very volatile stock. Over 5 years the most volatile fifth of the stocks
+    lost 1.55% per trade on average while the calmest fifth made 0.31%."""
+    if atr_pct is None or not np.isfinite(atr_pct):
+        return 0.0
+    lo = float(settings.get("scoring.vol_penalty_from") or 0.045)
+    hi = float(settings.get("scoring.vol_penalty_full") or 0.09)
+    mx = float(settings.get("scoring.vol_penalty_max") if settings.get("scoring.vol_penalty_max") is not None else 8)
+    return float(np.clip((atr_pct - lo) / max(1e-9, hi - lo), 0, 1) * mx)
+
+
+def is_fund(td: TickerData) -> bool:
+    """A fund / ETF / trust that got past the name filter: Yahoo's quote type, or the name."""
+    qt = str(td.info.get("quoteType") or "").upper()
+    return qt in ("ETF", "MUTUALFUND", "INDEX", "CRYPTOCURRENCY", "CURRENCY", "FUTURE") or is_fund_name(td.name)
 
 
 def explain(sigs: dict[str, SignalResult], weights: dict) -> dict:
@@ -322,6 +340,7 @@ def run_scan(settings, demo: bool = False, tickers: list[str] | None = None, pro
     panel = src.prices(sorted(set(meta) | {"SPY"}), settings.get("scan.history_period"))
     if panel["Close"].empty:
         raise RuntimeError("לא התקבלו נתוני מחירים. בדוק חיבור לאינטרנט.")
+    panel, price_fixes = clean_price_glitches(panel)   # one wrong price must not hit a stop or make a breakout
     feats = compute_panel_features(panel)
     t_last = panel["Close"].index[-1]
     elig = eligibility(feats, filters).loc[t_last].copy()
@@ -439,9 +458,23 @@ def run_scan(settings, demo: bool = False, tickers: list[str] | None = None, pro
         except Exception as e:  # noqa: BLE001
             log.warning("חישוב מודל הסיכוי נכשל עבור %s: %s", td.ticker, e)
         upside, coverage = composite(sigs, weights)
+        # The volatility penalty corrects the combined score. When the probability model picks (it passed its test
+        # and already weighs volatility among its features), the penalty would only veto its picks a second time,
+        # so the stock keeps its score and the warning stays.
+        vol_raw = vol_penalty(num(td.tech.get("atr_pct")), settings)
+        vpen = 0.0 if (use_model and pre is not None and not tickers) else vol_raw
+        upside = max(0.0, upside - vpen)
         risk, risk_reasons = risk_score(td, sigs, filters)
         atr = num(td.tech.get("atr14"))
         why = explain(sigs, weights)
+        if vol_raw >= 2:
+            day = f"תנודתית מאוד (כ־{num(td.tech.get('atr_pct')) * 100:.1f}% ביום בממוצע): ב־5 שנים מניות כאלה הרוויחו פחות"
+            why["cons"].append(f"{day}, ולכן ירדו {vpen:.0f} נקודות מהפוטנציאל" if vpen
+                               else f"{day} בממוצע. המודל כבר מביא את התנודתיות בחשבון, אבל צפויות תנודות חדות "
+                                    f"והסטופ רחוק – כמות קטנה")
+        fund = is_fund(td)
+        if fund:
+            why["cons"].insert(0, "זו קרן או תעודת סל, לא חברה – לא נבחרת")
         if deal.get("text"):
             why["cons"].insert(0, deal["text"])
         flags = list(sigs["filings"].data.get("flags", [])) if "filings" in sigs else []
@@ -451,7 +484,7 @@ def run_scan(settings, demo: bool = False, tickers: list[str] | None = None, pro
         results.append({
             "ticker": td.ticker, "name": td.name, "price": td.price, "upside": round(upside, 1),
             "risk": round(risk, 1), "coverage": coverage, "signals": sigs, "why": why,
-            "exclude": exclude, "flags": flags,
+            "exclude": exclude, "flags": flags, "fund": fund, "vol_penalty": round(vpen, 1),
             "deal": {k: deal.get(k) for k in ("status", "short", "text", "date", "forms", "jump", "base")}
             if deal.get("status") else None,
             "filings_checked": td.filings is not None,
@@ -486,7 +519,8 @@ def run_scan(settings, demo: bool = False, tickers: list[str] | None = None, pro
               "analysts": sum(1 for td in tds if td.details.get("eps_trend") is not None),
               "options": sum(1 for td in tds if td.details.get("options")),
               "sector": sum(1 for td in tds if td.info.get("sector")),
-              "telegram": len(tg_posts) if tg_on else None}
+              "telegram": len(tg_posts) if tg_on else None, "price_fixes": sum(price_fixes.values()),
+              "funds": sum(1 for r in results if r.get("fund"))}
     degraded = data_quality(health) if not tickers else []
     if degraded:
         log.warning("הסריקה חלקית: %s. לא נפתחות עסקאות בתיק הנייר, וריצת הגיבוי תנסה שוב.", "; ".join(degraded))
@@ -518,7 +552,9 @@ def run_scan(settings, demo: bool = False, tickers: list[str] | None = None, pro
     # why each stock was or was not picked (the self-review checks later whether each filter was right)
     check_edge = settings.get("scan.require_model_edge") and model is not None and model.quality > 0
     for r in results:
-        if r.get("exclude"):          # in a pending takeover or bankrupt: the upside is capped or gone
+        if r.get("fund"):             # a fund or ETF, not a company
+            r["why_not"] = "fund"
+        elif r.get("exclude"):        # in a pending takeover or bankrupt: the upside is capped or gone
             r["why_not"] = "deal"
         elif r["ticker"] in watch_only:
             r["why_not"] = "filters"

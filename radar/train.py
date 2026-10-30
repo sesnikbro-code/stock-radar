@@ -22,6 +22,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from .dataguard import clean_price_glitches
 from .features import (EARN, FEATURES, INDUSTRY, INSIDER, LABELS_HE, IndustryPeers, InsiderArrays, earnings_matrix,
                        market_at, tech_frame)
 from . import review as selfreview
@@ -280,6 +281,7 @@ def train_model(settings, demo: bool = False, out_path: Path | None = None) -> d
     tickers = _sample([u["ticker"] for u in universe], int(cfg.get("max_tickers") or 0))
     log.info("אימון המודל: מוריד %d שנות מחירים עבור %d מניות...", years + 1, len(tickers))
     panel = src.prices(sorted(set(tickers) | {"SPY"}), f"{years + 1}y", use_cache=False)
+    panel, _ = clean_price_glitches(panel)   # one wrong price must not create or end a trade
     C = panel["Close"]
     if C.empty or len(C) < 252 + W + 60:
         raise RuntimeError("לא התקבלו מספיק נתוני מחירים לאימון המודל.")
